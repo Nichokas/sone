@@ -462,75 +462,151 @@ impl TidalClient {
         })
     }
 
+    pub fn is_track_favorited(&self, user_id: u64, track_id: u64) -> Result<bool, String> {
+        let tokens = self.tokens.as_ref().ok_or("Not authenticated")?;
+        let response = self
+            .client
+            .get(format!("{}/users/{}/favorites/tracks", TIDAL_API_URL, user_id))
+            .header("Authorization", format!("Bearer {}", tokens.access_token))
+            .query(&[
+                ("countryCode", "US"),
+                ("limit", "2000"),
+                ("offset", "0"),
+                ("order", "DATE"),
+                ("orderDirection", "DESC"),
+            ])
+            .send()
+            .map_err(|e| format!("Failed to fetch favorite tracks: {}", e))?;
+
+        let status = response.status();
+        let body = response.text().unwrap_or_default();
+
+        if !status.is_success() {
+            return Err(format!("API error ({}): {}", status, body));
+        }
+
+        #[derive(Deserialize)]
+        struct FavoriteTrackItem {
+            #[serde(default)]
+            id: Option<u64>,
+            #[serde(default)]
+            item: Option<TidalTrack>,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct FavoriteTracksResponse {
+            #[serde(default)]
+            items: Vec<FavoriteTrackItem>,
+        }
+
+        let data = serde_json::from_str::<FavoriteTracksResponse>(&body)
+            .map_err(|e| format!("Failed to parse favorite tracks: {} - Body: {}", e, body))?;
+
+        Ok(data.items.iter().any(|entry| {
+            entry.id == Some(track_id)
+                || entry
+                    .item
+                    .as_ref()
+                    .is_some_and(|track| track.id == track_id)
+        }))
+    }
+
+    pub fn add_favorite_track(&self, user_id: u64, track_id: u64) -> Result<(), String> {
+        let tokens = self.tokens.as_ref().ok_or("Not authenticated")?;
+        let track_id_str = track_id.to_string();
+
+        let response = self
+            .client
+            .post(format!("{}/users/{}/favorites/tracks", TIDAL_API_URL, user_id))
+            .header("Authorization", format!("Bearer {}", tokens.access_token))
+            .query(&[("countryCode", "US")])
+            .form(&[("trackId", track_id_str.as_str())])
+            .send()
+            .map_err(|e| format!("Failed to favorite track: {}", e))?;
+
+        let status = response.status();
+        let body = response.text().unwrap_or_default();
+
+        if !status.is_success() {
+            return Err(format!("API error ({}): {}", status, body));
+        }
+
+        Ok(())
+    }
+
+    pub fn remove_favorite_track(&self, user_id: u64, track_id: u64) -> Result<(), String> {
+        let tokens = self.tokens.as_ref().ok_or("Not authenticated")?;
+
+        let response = self
+            .client
+            .delete(format!(
+                "{}/users/{}/favorites/tracks/{}",
+                TIDAL_API_URL, user_id, track_id
+            ))
+            .header("Authorization", format!("Bearer {}", tokens.access_token))
+            .query(&[("countryCode", "US")])
+            .send()
+            .map_err(|e| format!("Failed to remove favorite track: {}", e))?;
+
+        let status = response.status();
+        let body = response.text().unwrap_or_default();
+
+        if !status.is_success() {
+            return Err(format!("API error ({}): {}", status, body));
+        }
+
+        Ok(())
+    }
+
     pub fn is_album_favorited(&self, user_id: u64, album_id: u64) -> Result<bool, String> {
         let tokens = self.tokens.as_ref().ok_or("Not authenticated")?;
-        let mut offset: u32 = 0;
-        let limit: u32 = 100;
+        let response = self
+            .client
+            .get(format!("{}/users/{}/favorites/albums", TIDAL_API_URL, user_id))
+            .header("Authorization", format!("Bearer {}", tokens.access_token))
+            .query(&[
+                ("countryCode", "US"),
+                ("limit", "2000"),
+                ("offset", "0"),
+                ("order", "DATE"),
+                ("orderDirection", "DESC"),
+            ])
+            .send()
+            .map_err(|e| format!("Failed to fetch favorite albums: {}", e))?;
 
-        loop {
-            let response = self
-                .client
-                .get(format!("{}/users/{}/favorites/albums", TIDAL_API_URL, user_id))
-                .header("Authorization", format!("Bearer {}", tokens.access_token))
-                .query(&[
-                    ("countryCode", "US"),
-                    ("limit", &limit.to_string()),
-                    ("offset", &offset.to_string()),
-                    ("order", "DATE"),
-                    ("orderDirection", "DESC"),
-                ])
-                .send()
-                .map_err(|e| format!("Failed to fetch favorite albums: {}", e))?;
+        let status = response.status();
+        let body = response.text().unwrap_or_default();
 
-            let status = response.status();
-            let body = response.text().unwrap_or_default();
-
-            if !status.is_success() {
-                return Err(format!("API error ({}): {}", status, body));
-            }
-
-            #[derive(Deserialize)]
-            struct FavoriteAlbumItem {
-                #[serde(default)]
-                id: Option<u64>,
-                #[serde(default)]
-                item: Option<TidalAlbum>,
-            }
-
-            #[derive(Deserialize)]
-            #[serde(rename_all = "camelCase")]
-            struct FavoriteAlbumsResponse {
-                #[serde(default)]
-                items: Vec<FavoriteAlbumItem>,
-                #[serde(default)]
-                total_number_of_items: u32,
-            }
-
-            let data = serde_json::from_str::<FavoriteAlbumsResponse>(&body)
-                .map_err(|e| format!("Failed to parse favorite albums: {} - Body: {}", e, body))?;
-
-            let has_album = data.items.iter().any(|entry| {
-                entry.id == Some(album_id)
-                    || entry
-                        .item
-                        .as_ref()
-                        .is_some_and(|album| album.id == album_id)
-            });
-
-            if has_album {
-                return Ok(true);
-            }
-
-            let page_count = data.items.len() as u32;
-            if page_count == 0 {
-                return Ok(false);
-            }
-
-            offset += page_count;
-            if offset >= data.total_number_of_items || page_count < limit {
-                return Ok(false);
-            }
+        if !status.is_success() {
+            return Err(format!("API error ({}): {}", status, body));
         }
+
+        #[derive(Deserialize)]
+        struct FavoriteAlbumItem {
+            #[serde(default)]
+            id: Option<u64>,
+            #[serde(default)]
+            item: Option<TidalAlbum>,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct FavoriteAlbumsResponse {
+            #[serde(default)]
+            items: Vec<FavoriteAlbumItem>,
+        }
+
+        let data = serde_json::from_str::<FavoriteAlbumsResponse>(&body)
+            .map_err(|e| format!("Failed to parse favorite albums: {} - Body: {}", e, body))?;
+
+        Ok(data.items.iter().any(|entry| {
+            entry.id == Some(album_id)
+                || entry
+                    .item
+                    .as_ref()
+                    .is_some_and(|album| album.id == album_id)
+        }))
     }
 
     pub fn add_favorite_album(&self, user_id: u64, album_id: u64) -> Result<(), String> {

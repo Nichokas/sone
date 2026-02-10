@@ -494,6 +494,45 @@ export function useAudio() {
     }
   };
 
+  const isTrackFavorited = async (trackId: number): Promise<boolean> => {
+    if (!authTokens?.user_id) throw new Error("Not authenticated");
+    try {
+      return await invoke<boolean>("is_track_favorited", {
+        userId: authTokens.user_id,
+        trackId,
+      });
+    } catch (error: any) {
+      console.error("Failed to check track favorite status:", error);
+      throw error;
+    }
+  };
+
+  const addFavoriteTrack = async (trackId: number): Promise<void> => {
+    if (!authTokens?.user_id) throw new Error("Not authenticated");
+    try {
+      await invoke("add_favorite_track", {
+        userId: authTokens.user_id,
+        trackId,
+      });
+    } catch (error: any) {
+      console.error("Failed to favorite track:", error);
+      throw error;
+    }
+  };
+
+  const removeFavoriteTrack = async (trackId: number): Promise<void> => {
+    if (!authTokens?.user_id) throw new Error("Not authenticated");
+    try {
+      await invoke("remove_favorite_track", {
+        userId: authTokens.user_id,
+        trackId,
+      });
+    } catch (error: any) {
+      console.error("Failed to remove favorite track:", error);
+      throw error;
+    }
+  };
+
   const isAlbumFavorited = async (albumId: number): Promise<boolean> => {
     if (!authTokens?.user_id) throw new Error("Not authenticated");
     try {
@@ -658,6 +697,9 @@ export function useAudio() {
     getAlbumDetail,
     getAlbumTracks,
     getFavoriteTracks,
+    isTrackFavorited,
+    addFavoriteTrack,
+    removeFavoriteTrack,
     isAlbumFavorited,
     addFavoriteAlbum,
     removeFavoriteAlbum,

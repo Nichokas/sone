@@ -9,6 +9,7 @@ import {
   VolumeX,
   Volume1,
   Heart,
+  Loader2,
   ListMusic,
   Mic2,
   MonitorSpeaker,
@@ -22,6 +23,7 @@ export default function PlayerBar() {
   const {
     isPlaying,
     currentTrack,
+    authTokens,
     volume,
     pauseTrack,
     resumeTrack,
@@ -30,11 +32,16 @@ export default function PlayerBar() {
     playPrevious,
     getPlaybackPosition,
     seekTo,
+    isTrackFavorited,
+    addFavoriteTrack,
+    removeFavoriteTrack,
   } = useAudioContext();
 
   const [localVolume, setLocalVolume] = useState(volume);
   const [currentTime, setCurrentTime] = useState(0);
-  const [likedTracks, setLikedTracks] = useState<Set<number>>(new Set());
+  const [isLiked, setIsLiked] = useState(false);
+  const [isLikeLoading, setIsLikeLoading] = useState(false);
+  const [isLikePending, setIsLikePending] = useState(false);
   const [isShuffle, setIsShuffle] = useState(false);
   const [repeatMode, setRepeatMode] = useState(0);
   const [isDragging, setIsDragging] = useState(false);
@@ -42,18 +49,32 @@ export default function PlayerBar() {
   const [isHoveringProgress, setIsHoveringProgress] = useState(false);
   const progressRef = useRef<HTMLDivElement>(null);
 
-  const isLiked = currentTrack ? likedTracks.has(currentTrack.id) : false;
+  const toggleLike = useCallback(async () => {
+    if (!currentTrack || isLikeLoading || isLikePending) return;
 
-  const toggleLike = useCallback(() => {
-    if (!currentTrack) return;
-    const id = currentTrack.id;
-    setLikedTracks((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  }, [currentTrack]);
+    setIsLikePending(true);
+    const nextLiked = !isLiked;
+
+    try {
+      if (nextLiked) {
+        await addFavoriteTrack(currentTrack.id);
+      } else {
+        await removeFavoriteTrack(currentTrack.id);
+      }
+      setIsLiked(nextLiked);
+    } catch (err) {
+      console.error("Failed to toggle track favorite:", err);
+    } finally {
+      setIsLikePending(false);
+    }
+  }, [
+    currentTrack,
+    isLikeLoading,
+    isLikePending,
+    isLiked,
+    addFavoriteTrack,
+    removeFavoriteTrack,
+  ]);
 
   // Sync progress with backend playback position
   useEffect(() => {
@@ -73,6 +94,47 @@ export default function PlayerBar() {
   useEffect(() => {
     setCurrentTime(0);
   }, [currentTrack?.id]);
+
+  // Sync favorite state with backend for currently playing track
+  useEffect(() => {
+    if (!currentTrack) {
+      setIsLiked(false);
+      setIsLikeLoading(false);
+      setIsLikePending(false);
+      return;
+    }
+
+    if (!authTokens?.user_id) {
+      setIsLikeLoading(true);
+      return;
+    }
+
+    let cancelled = false;
+    setIsLikeLoading(true);
+    setIsLikePending(false);
+
+    isTrackFavorited(currentTrack.id)
+      .then((favorited) => {
+        if (!cancelled) {
+          setIsLiked(favorited);
+        }
+      })
+      .catch((err) => {
+        console.error("Failed to check current track favorite state:", err);
+        if (!cancelled) {
+          setIsLiked(false);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setIsLikeLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [currentTrack?.id, authTokens?.user_id]);
 
   const duration = currentTrack?.duration ?? 0;
   const displayTime = isDragging ? dragTime : currentTime;
@@ -192,15 +254,24 @@ export default function PlayerBar() {
             </div>
             <button
               onClick={toggleLike}
+              disabled={isLikeLoading || isLikePending}
               className={`ml-1 flex-shrink-0 transition-all duration-200 active:scale-90 ${
                 isLiked ? "text-[#1ed760]" : "text-[#666] hover:text-white"
+              } ${
+                isLikeLoading || isLikePending
+                  ? "opacity-70 cursor-not-allowed"
+                  : ""
               }`}
             >
-              <Heart
-                size={16}
-                fill={isLiked ? "currentColor" : "none"}
-                strokeWidth={isLiked ? 0 : 2}
-              />
+              {isLikeLoading || isLikePending ? (
+                <Loader2 size={16} className="animate-spin" />
+              ) : (
+                <Heart
+                  size={16}
+                  fill={isLiked ? "currentColor" : "none"}
+                  strokeWidth={isLiked ? 0 : 2}
+                />
+              )}
             </button>
           </>
         ) : (
