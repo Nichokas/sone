@@ -7,23 +7,21 @@ import { useState } from "react";
 export default function Sidebar() {
   const {
     userPlaylists,
-    getPlaylistTracks,
-    playTrack,
+    navigateToPlaylist,
     navigateToFavorites,
     navigateHome,
     currentView,
   } = useAudioContext();
   const [isCollapsed, setIsCollapsed] = useState(false);
 
-  const handlePlaylistClick = async (playlistId: string) => {
-    try {
-      const tracks = await getPlaylistTracks(playlistId);
-      if (tracks.length > 0) {
-        playTrack(tracks[0]);
-      }
-    } catch (err) {
-      console.error("Failed to play playlist:", err);
-    }
+  const handlePlaylistClick = (playlist: (typeof userPlaylists)[number]) => {
+    navigateToPlaylist(playlist.uuid, {
+      title: playlist.title,
+      image: playlist.image,
+      description: playlist.description,
+      creatorName: playlist.creator?.name || "You",
+      numberOfTracks: playlist.numberOfTracks,
+    });
   };
 
   return (
@@ -160,10 +158,13 @@ export default function Sidebar() {
               {userPlaylists.map((playlist) => (
                 <button
                   key={playlist.uuid}
-                  onClick={() => handlePlaylistClick(playlist.uuid)}
-                  className={`w-full flex items-center gap-2.5 px-1.5 py-1.5 rounded-md transition-all duration-150 group hover:bg-white/[0.06] ${
-                    isCollapsed ? "justify-center" : ""
-                  }`}
+                  onClick={() => handlePlaylistClick(playlist)}
+                  className={`w-full flex items-center gap-2.5 px-1.5 py-1.5 rounded-md transition-all duration-150 group ${
+                    currentView.type === "playlist" &&
+                    currentView.playlistId === playlist.uuid
+                      ? "bg-white/[0.08]"
+                      : "hover:bg-white/[0.06]"
+                  } ${isCollapsed ? "justify-center" : ""}`}
                   title={playlist.title}
                 >
                   <div

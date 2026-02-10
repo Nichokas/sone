@@ -1,6 +1,7 @@
 import Layout from "./components/Layout";
 import Home from "./components/Home";
 import AlbumView from "./components/AlbumView";
+import PlaylistView from "./components/PlaylistView";
 import FavoritesView from "./components/FavoritesView";
 import Login from "./components/Login";
 import { AudioProvider, useAudioContext } from "./contexts/AudioContext";
@@ -20,6 +21,14 @@ function AppContent() {
           <AlbumView
             albumId={currentView.albumId}
             albumInfo={currentView.albumInfo}
+            onBack={navigateHome}
+          />
+        );
+      case "playlist":
+        return (
+          <PlaylistView
+            playlistId={currentView.playlistId}
+            playlistInfo={currentView.playlistInfo}
             onBack={navigateHome}
           />
         );

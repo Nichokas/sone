@@ -54,6 +54,17 @@ export type AppView =
       albumId: number;
       albumInfo?: { title: string; cover?: string; artistName?: string };
     }
+  | {
+      type: "playlist";
+      playlistId: string;
+      playlistInfo?: {
+        title: string;
+        image?: string;
+        description?: string;
+        creatorName?: string;
+        numberOfTracks?: number;
+      };
+    }
   | { type: "favorites" };
 
 export interface Playlist {
@@ -82,6 +93,15 @@ export interface AuthTokens {
   user_id?: number;
 }
 
+interface PlaybackSnapshot {
+  currentTrack: Track | null;
+  queue: Track[];
+  history: Track[];
+  volume: number;
+}
+
+const PLAYBACK_STATE_KEY = "tide-vibe.playback-state.v1";
+
 export function useAudio() {
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTrack, setCurrentTrack] = useState<Track | null>(null);
@@ -93,11 +113,52 @@ export function useAudio() {
   const [currentView, setCurrentView] = useState<AppView>({ type: "home" });
   const [history, setHistory] = useState<Track[]>([]);
   const currentTrackRef = useRef<Track | null>(null);
+  const hasRestoredPlaybackRef = useRef(false);
 
   // Keep ref in sync so callbacks always see latest value
   useEffect(() => {
     currentTrackRef.current = currentTrack;
   }, [currentTrack]);
+
+  // Restore last playback session (track + queue + history + volume)
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(PLAYBACK_STATE_KEY);
+      if (!raw) {
+        return;
+      }
+
+      const parsed = JSON.parse(raw) as Partial<PlaybackSnapshot>;
+
+      if (parsed.currentTrack && typeof parsed.currentTrack.id === "number") {
+        setCurrentTrack(parsed.currentTrack as Track);
+      }
+
+      if (Array.isArray(parsed.queue)) {
+        setQueue(
+          parsed.queue.filter(
+            (track): track is Track => !!track && typeof track.id === "number"
+          )
+        );
+      }
+
+      if (Array.isArray(parsed.history)) {
+        setHistory(
+          parsed.history.filter(
+            (track): track is Track => !!track && typeof track.id === "number"
+          )
+        );
+      }
+
+      if (typeof parsed.volume === "number") {
+        setVolumeState(Math.min(1, Math.max(0, parsed.volume)));
+      }
+    } catch (err) {
+      console.error("Failed to restore playback state:", err);
+    } finally {
+      hasRestoredPlaybackRef.current = true;
+    }
+  }, []);
 
   // Load saved auth on mount
   useEffect(() => {
@@ -184,6 +245,26 @@ export function useAudio() {
     loadAuth();
   }, []);
 
+  // Persist now-playing state and queue across app relaunches
+  useEffect(() => {
+    if (!hasRestoredPlaybackRef.current) {
+      return;
+    }
+
+    const snapshot: PlaybackSnapshot = {
+      currentTrack,
+      queue,
+      history,
+      volume,
+    };
+
+    try {
+      localStorage.setItem(PLAYBACK_STATE_KEY, JSON.stringify(snapshot));
+    } catch (err) {
+      console.error("Failed to persist playback state:", err);
+    }
+  }, [currentTrack, queue, history, volume]);
+
   // Auto-play next track when current finishes
   useEffect(() => {
     if (!isPlaying || !currentTrack) return;
@@ -244,6 +325,13 @@ export function useAudio() {
       setUserPlaylists([]);
       setCurrentTrack(null);
       setIsPlaying(false);
+      setQueue([]);
+      setHistory([]);
+      try {
+        localStorage.removeItem(PLAYBACK_STATE_KEY);
+      } catch (err) {
+        console.error("Failed to clear playback state:", err);
+      }
     } catch (error) {
       console.error("Failed to logout:", error);
     }
@@ -376,6 +464,19 @@ export function useAudio() {
     setCurrentView({ type: "album", albumId, albumInfo });
   };
 
+  const navigateToPlaylist = (
+    playlistId: string,
+    playlistInfo?: {
+      title: string;
+      image?: string;
+      description?: string;
+      creatorName?: string;
+      numberOfTracks?: number;
+    }
+  ) => {
+    setCurrentView({ type: "playlist", playlistId, playlistInfo });
+  };
+
   const getFavoriteTracks = async (
     offset: number = 0,
     limit: number = 50
@@ -389,6 +490,45 @@ export function useAudio() {
       });
     } catch (error: any) {
       console.error("Failed to get favorite tracks:", error);
+      throw error;
+    }
+  };
+
+  const isAlbumFavorited = async (albumId: number): Promise<boolean> => {
+    if (!authTokens?.user_id) throw new Error("Not authenticated");
+    try {
+      return await invoke<boolean>("is_album_favorited", {
+        userId: authTokens.user_id,
+        albumId,
+      });
+    } catch (error: any) {
+      console.error("Failed to check album favorite status:", error);
+      throw error;
+    }
+  };
+
+  const addFavoriteAlbum = async (albumId: number): Promise<void> => {
+    if (!authTokens?.user_id) throw new Error("Not authenticated");
+    try {
+      await invoke("add_favorite_album", {
+        userId: authTokens.user_id,
+        albumId,
+      });
+    } catch (error: any) {
+      console.error("Failed to favorite album:", error);
+      throw error;
+    }
+  };
+
+  const removeFavoriteAlbum = async (albumId: number): Promise<void> => {
+    if (!authTokens?.user_id) throw new Error("Not authenticated");
+    try {
+      await invoke("remove_favorite_album", {
+        userId: authTokens.user_id,
+        albumId,
+      });
+    } catch (error: any) {
+      console.error("Failed to remove favorite album:", error);
       throw error;
     }
   };
@@ -518,7 +658,11 @@ export function useAudio() {
     getAlbumDetail,
     getAlbumTracks,
     getFavoriteTracks,
+    isAlbumFavorited,
+    addFavoriteAlbum,
+    removeFavoriteAlbum,
     navigateToAlbum,
+    navigateToPlaylist,
     navigateToFavorites,
     navigateHome,
   };

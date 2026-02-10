@@ -1,4 +1,12 @@
-import { ChevronLeft, Play, Clock, Pause, Music, Loader2 } from "lucide-react";
+import {
+  ChevronLeft,
+  Play,
+  Clock,
+  Pause,
+  Music,
+  Loader2,
+  Heart,
+} from "lucide-react";
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useAudioContext } from "../contexts/AudioContext";
 import {
@@ -45,12 +53,18 @@ export default function AlbumView({
     isPlaying,
     pauseTrack,
     resumeTrack,
+    isAlbumFavorited,
+    addFavoriteAlbum,
+    removeFavoriteAlbum,
   } = useAudioContext();
 
   const [album, setAlbum] = useState<AlbumDetail | null>(null);
   const [tracks, setTracks] = useState<Track[]>([]);
   const [totalTracks, setTotalTracks] = useState(0);
   const [loading, setLoading] = useState(true);
+  const [favoriteLoading, setFavoriteLoading] = useState(true);
+  const [albumFavorited, setAlbumFavorited] = useState(false);
+  const [favoritePending, setFavoritePending] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -67,20 +81,26 @@ export default function AlbumView({
 
     const loadAlbum = async () => {
       setLoading(true);
+      setFavoriteLoading(true);
       setError(null);
       setTracks([]);
       offsetRef.current = 0;
       hasMoreRef.current = true;
 
       try {
-        const [detail, firstPage] = await Promise.all([
+        const [detail, firstPage, favorited] = await Promise.all([
           getAlbumDetail(albumId),
           getAlbumTracks(albumId, 0, PAGE_SIZE),
+          isAlbumFavorited(albumId).catch((favoriteErr) => {
+            console.error("Failed to fetch album favorite state:", favoriteErr);
+            return false;
+          }),
         ]);
 
         if (cancelled) return;
 
         setAlbum(detail);
+        setAlbumFavorited(favorited);
         setTracks(firstPage.items);
         setTotalTracks(firstPage.totalNumberOfItems);
         offsetRef.current = firstPage.items.length;
@@ -92,7 +112,10 @@ export default function AlbumView({
           setError(err?.message || String(err));
         }
       } finally {
-        if (!cancelled) setLoading(false);
+        if (!cancelled) {
+          setLoading(false);
+          setFavoriteLoading(false);
+        }
       }
     };
 
@@ -181,6 +204,26 @@ export default function AlbumView({
       await playTrack(tracks[0]);
     } catch (err) {
       console.error("Failed to play all:", err);
+    }
+  };
+
+  const handleToggleFavorite = async () => {
+    if (favoriteLoading || favoritePending) return;
+
+    const nextFavoriteState = !albumFavorited;
+    setFavoritePending(true);
+
+    try {
+      if (nextFavoriteState) {
+        await addFavoriteAlbum(albumId);
+      } else {
+        await removeFavoriteAlbum(albumId);
+      }
+      setAlbumFavorited(nextFavoriteState);
+    } catch (err) {
+      console.error("Failed to toggle album favorite:", err);
+    } finally {
+      setFavoritePending(false);
     }
   };
 
@@ -303,6 +346,27 @@ export default function AlbumView({
             <Pause size={24} fill="black" className="text-black" />
           ) : (
             <Play size={24} fill="black" className="text-black ml-1" />
+          )}
+        </button>
+        <button
+          onClick={handleToggleFavorite}
+          disabled={favoriteLoading || favoritePending}
+          className={`w-10 h-10 rounded-full flex items-center justify-center transition-all ${
+            albumFavorited
+              ? "text-[#1ed760] hover:brightness-110"
+              : "text-[#a6a6a6] hover:text-white hover:bg-white/[0.08]"
+          } disabled:opacity-60 disabled:cursor-not-allowed`}
+          title={albumFavorited ? "Remove from favorites" : "Add to favorites"}
+          aria-label={albumFavorited ? "Unfavorite album" : "Favorite album"}
+        >
+          {favoriteLoading || favoritePending ? (
+            <Loader2 size={18} className="animate-spin" />
+          ) : (
+            <Heart
+              size={20}
+              fill={albumFavorited ? "currentColor" : "none"}
+              strokeWidth={albumFavorited ? 0 : 2}
+            />
           )}
         </button>
       </div>

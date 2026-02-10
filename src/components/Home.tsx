@@ -1,7 +1,7 @@
 import { Play, ChevronLeft, ChevronRight, Bell, Heart } from "lucide-react";
 import { useState, useEffect } from "react";
 import { useAudioContext } from "../contexts/AudioContext";
-import { getTidalImageUrl, type Track } from "../hooks/useAudio";
+import { getTidalImageUrl, type Playlist, type Track } from "../hooks/useAudio";
 import TidalImage from "./TidalImage";
 
 export default function Home() {
@@ -12,6 +12,7 @@ export default function Home() {
     userPlaylists,
     authTokens,
     navigateToAlbum,
+    navigateToPlaylist,
     navigateToFavorites,
   } = useAudioContext();
   const [featuredTracks, setFeaturedTracks] = useState<Track[]>([]);
@@ -46,16 +47,14 @@ export default function Home() {
     }
   };
 
-  const handlePlaylistPlay = async (playlistId: string) => {
-    try {
-      const tracks = await getPlaylistTracks(playlistId);
-      if (tracks.length > 0) {
-        setQueueTracks(tracks.slice(1));
-        await playTrack(tracks[0]);
-      }
-    } catch (err) {
-      console.error("Failed to play:", err);
-    }
+  const handleOpenPlaylist = (playlist: Playlist) => {
+    navigateToPlaylist(playlist.uuid, {
+      title: playlist.title,
+      image: playlist.image,
+      description: playlist.description,
+      creatorName: playlist.creator?.name || "You",
+      numberOfTracks: playlist.numberOfTracks,
+    });
   };
 
   if (loading) {
@@ -123,7 +122,7 @@ export default function Home() {
             {userPlaylists.slice(0, 7).map((playlist) => (
               <div
                 key={playlist.uuid}
-                onClick={() => handlePlaylistPlay(playlist.uuid)}
+                onClick={() => handleOpenPlaylist(playlist)}
                 className="flex items-center bg-[#2a2a2a]/40 hover:bg-[#2a2a2a] rounded-[4px] overflow-hidden cursor-pointer group transition-all duration-300 h-[64px] shadow-sm hover:shadow-md"
               >
                 <div className="w-[64px] h-[64px] flex-shrink-0 bg-[#282828] shadow-lg">
@@ -221,7 +220,7 @@ export default function Home() {
             {userPlaylists.slice(0, 16).map((playlist) => (
               <div
                 key={playlist.uuid}
-                onClick={() => handlePlaylistPlay(playlist.uuid)}
+                onClick={() => handleOpenPlaylist(playlist)}
                 className="p-3 bg-[#181818] hover:bg-[#282828] rounded-md cursor-pointer group transition-all duration-300"
               >
                 <div className="aspect-square w-full rounded-md mb-3 relative overflow-hidden shadow-lg bg-[#282828]">

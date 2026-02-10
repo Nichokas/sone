@@ -462,6 +462,124 @@ impl TidalClient {
         })
     }
 
+    pub fn is_album_favorited(&self, user_id: u64, album_id: u64) -> Result<bool, String> {
+        let tokens = self.tokens.as_ref().ok_or("Not authenticated")?;
+        let mut offset: u32 = 0;
+        let limit: u32 = 100;
+
+        loop {
+            let response = self
+                .client
+                .get(format!("{}/users/{}/favorites/albums", TIDAL_API_URL, user_id))
+                .header("Authorization", format!("Bearer {}", tokens.access_token))
+                .query(&[
+                    ("countryCode", "US"),
+                    ("limit", &limit.to_string()),
+                    ("offset", &offset.to_string()),
+                    ("order", "DATE"),
+                    ("orderDirection", "DESC"),
+                ])
+                .send()
+                .map_err(|e| format!("Failed to fetch favorite albums: {}", e))?;
+
+            let status = response.status();
+            let body = response.text().unwrap_or_default();
+
+            if !status.is_success() {
+                return Err(format!("API error ({}): {}", status, body));
+            }
+
+            #[derive(Deserialize)]
+            struct FavoriteAlbumItem {
+                #[serde(default)]
+                id: Option<u64>,
+                #[serde(default)]
+                item: Option<TidalAlbum>,
+            }
+
+            #[derive(Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct FavoriteAlbumsResponse {
+                #[serde(default)]
+                items: Vec<FavoriteAlbumItem>,
+                #[serde(default)]
+                total_number_of_items: u32,
+            }
+
+            let data = serde_json::from_str::<FavoriteAlbumsResponse>(&body)
+                .map_err(|e| format!("Failed to parse favorite albums: {} - Body: {}", e, body))?;
+
+            let has_album = data.items.iter().any(|entry| {
+                entry.id == Some(album_id)
+                    || entry
+                        .item
+                        .as_ref()
+                        .is_some_and(|album| album.id == album_id)
+            });
+
+            if has_album {
+                return Ok(true);
+            }
+
+            let page_count = data.items.len() as u32;
+            if page_count == 0 {
+                return Ok(false);
+            }
+
+            offset += page_count;
+            if offset >= data.total_number_of_items || page_count < limit {
+                return Ok(false);
+            }
+        }
+    }
+
+    pub fn add_favorite_album(&self, user_id: u64, album_id: u64) -> Result<(), String> {
+        let tokens = self.tokens.as_ref().ok_or("Not authenticated")?;
+        let album_id_str = album_id.to_string();
+
+        let response = self
+            .client
+            .post(format!("{}/users/{}/favorites/albums", TIDAL_API_URL, user_id))
+            .header("Authorization", format!("Bearer {}", tokens.access_token))
+            .query(&[("countryCode", "US")])
+            .form(&[("albumId", album_id_str.as_str())])
+            .send()
+            .map_err(|e| format!("Failed to favorite album: {}", e))?;
+
+        let status = response.status();
+        let body = response.text().unwrap_or_default();
+
+        if !status.is_success() {
+            return Err(format!("API error ({}): {}", status, body));
+        }
+
+        Ok(())
+    }
+
+    pub fn remove_favorite_album(&self, user_id: u64, album_id: u64) -> Result<(), String> {
+        let tokens = self.tokens.as_ref().ok_or("Not authenticated")?;
+
+        let response = self
+            .client
+            .delete(format!(
+                "{}/users/{}/favorites/albums/{}",
+                TIDAL_API_URL, user_id, album_id
+            ))
+            .header("Authorization", format!("Bearer {}", tokens.access_token))
+            .query(&[("countryCode", "US")])
+            .send()
+            .map_err(|e| format!("Failed to remove favorite album: {}", e))?;
+
+        let status = response.status();
+        let body = response.text().unwrap_or_default();
+
+        if !status.is_success() {
+            return Err(format!("API error ({}): {}", status, body));
+        }
+
+        Ok(())
+    }
+
     pub fn get_stream_url(&self, track_id: u64, quality: &str) -> Result<String, String> {
         let tokens = self.tokens.as_ref().ok_or("Not authenticated")?;
 
