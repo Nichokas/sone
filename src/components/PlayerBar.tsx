@@ -147,49 +147,64 @@ export default function PlayerBar() {
   };
 
   // --- Scrubber drag logic ---
+  // On WebKit-based engines (Linux WebKitGTK, macOS WebKit used by Tauri),
+  // getBoundingClientRect() returns CSS-pixel values while clientX is in
+  // viewport (zoomed) coordinates.  Detect the mismatch by comparing
+  // rect.width with offsetWidth (always CSS pixels) and adjust.
   const getTimeFromClientX = useCallback(
     (clientX: number) => {
       if (!progressRef.current || !currentTrack) return 0;
-      const rect = progressRef.current.getBoundingClientRect();
-      const pct = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+      const el = progressRef.current;
+      const rect = el.getBoundingClientRect();
+
+      let adjustedX = clientX;
+      const cssWidth = el.offsetWidth;
+      if (cssWidth > 0 && Math.abs(rect.width / cssWidth - 1) < 0.01) {
+        const zoom = parseFloat(document.documentElement.style.zoom || "1");
+        if (zoom !== 1) {
+          adjustedX = clientX / zoom;
+        }
+      }
+
+      const pct = Math.max(
+        0,
+        Math.min(1, (adjustedX - rect.left) / rect.width)
+      );
       return pct * currentTrack.duration;
     },
     [currentTrack]
   );
 
+  // Register mousemove / mouseup synchronously inside the mousedown handler
+  // so that even an instant click (mouseup fires before React re-renders)
+  // is captured correctly.
   const handleProgressMouseDown = useCallback(
     (e: React.MouseEvent) => {
       if (!currentTrack) return;
       e.preventDefault();
-      const time = getTimeFromClientX(e.clientX);
+      const startTime = getTimeFromClientX(e.clientX);
       setIsDragging(true);
-      setDragTime(time);
+      setDragTime(startTime);
+
+      const onMove = (ev: MouseEvent) => {
+        setDragTime(getTimeFromClientX(ev.clientX));
+      };
+
+      const onUp = async (ev: MouseEvent) => {
+        document.removeEventListener("mousemove", onMove);
+        document.removeEventListener("mouseup", onUp);
+        const finalTime = getTimeFromClientX(ev.clientX);
+        setIsDragging(false);
+        setIsHoveringProgress(false);
+        setCurrentTime(finalTime);
+        await seekTo(finalTime);
+      };
+
+      document.addEventListener("mousemove", onMove);
+      document.addEventListener("mouseup", onUp);
     },
-    [currentTrack, getTimeFromClientX]
+    [currentTrack, getTimeFromClientX, seekTo]
   );
-
-  useEffect(() => {
-    if (!isDragging) return;
-
-    const handleMouseMove = (e: MouseEvent) => {
-      setDragTime(getTimeFromClientX(e.clientX));
-    };
-
-    const handleMouseUp = async (e: MouseEvent) => {
-      const finalTime = getTimeFromClientX(e.clientX);
-      setIsDragging(false);
-      setIsHoveringProgress(false);
-      setCurrentTime(finalTime);
-      await seekTo(finalTime);
-    };
-
-    document.addEventListener("mousemove", handleMouseMove);
-    document.addEventListener("mouseup", handleMouseUp);
-    return () => {
-      document.removeEventListener("mousemove", handleMouseMove);
-      document.removeEventListener("mouseup", handleMouseUp);
-    };
-  }, [isDragging, getTimeFromClientX, seekTo]);
 
   const handleVolumeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     setVolume(parseFloat(e.target.value));
@@ -228,12 +243,12 @@ export default function PlayerBar() {
   };
 
   return (
-    <div className="player-bar h-[80px] bg-[#181818] border-t border-white/[0.06] px-4 flex items-center justify-between relative z-50 select-none">
+    <div className="player-bar h-[90px] bg-[#181818] border-t border-white/[0.06] px-4 flex items-center justify-between relative z-50 select-none">
       {/* Left: Track Info */}
       <div className="flex items-center gap-3 w-[30%] min-w-[180px]">
         {currentTrack ? (
           <>
-            <div className="w-14 h-14 rounded-md bg-[#282828] flex-shrink-0 overflow-hidden shadow-lg shadow-black/40 group cursor-pointer">
+            <div className="w-16 h-16 rounded-md bg-[#282828] flex-shrink-0 overflow-hidden shadow-lg shadow-black/40 group cursor-pointer">
               <TidalImage
                 src={getTidalImageUrl(currentTrack.album?.cover, 160)}
                 alt={currentTrack.album?.title || currentTrack.title}
