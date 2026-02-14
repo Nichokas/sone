@@ -98,6 +98,33 @@ export interface SearchResults {
   topHitType?: string;
 }
 
+export interface DirectHitItem {
+  hitType: string; // "ARTISTS", "ALBUMS", "TRACKS", "PLAYLISTS"
+  id?: number;
+  uuid?: string;
+  name?: string;
+  title?: string;
+  picture?: string;
+  cover?: string;
+  image?: string;
+  artistName?: string;
+  albumId?: number;
+  albumTitle?: string;
+  albumCover?: string;
+  duration?: number;
+  numberOfTracks?: number;
+}
+
+export interface SuggestionTextItem {
+  query: string;
+  source: string; // "history" or "suggestion"
+}
+
+export interface SuggestionsResponse {
+  textSuggestions: SuggestionTextItem[];
+  directHits: DirectHitItem[];
+}
+
 export interface Playlist {
   uuid: string;
   title: string;
@@ -1188,12 +1215,12 @@ export function useAudio() {
     []
   );
 
-  const searchSuggestions = useCallback(
-    async (query: string, limit: number = 3): Promise<string[]> => {
+  const getSuggestions = useCallback(
+    async (query: string, limit: number = 10): Promise<SuggestionsResponse> => {
       try {
-        return await invoke<string[]>("search_suggestions", { query, limit });
+        return await invoke<SuggestionsResponse>("get_suggestions", { query, limit });
       } catch {
-        return [];
+        return { textSuggestions: [], directHits: [] };
       }
     },
     []
@@ -1406,7 +1433,7 @@ export function useAudio() {
     navigateToMix,
     navigateToTrackRadio,
     searchTidal,
-    searchSuggestions,
+    getSuggestions,
     getHomePage,
     refreshHomePage,
     getFavoriteArtists,

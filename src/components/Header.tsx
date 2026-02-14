@@ -9,7 +9,7 @@ import {
 } from "lucide-react";
 import { useState, useRef, useCallback, useEffect } from "react";
 import { useAudioContext } from "../contexts/AudioContext";
-import { getTidalImageUrl, type SearchResults, type Track } from "../hooks/useAudio";
+import { getTidalImageUrl, type DirectHitItem, type SuggestionTextItem, type Track } from "../hooks/useAudio";
 import TidalImage from "./TidalImage";
 import TrackContextMenu from "./TrackContextMenu";
 import UserMenu from "./UserMenu";
@@ -41,21 +41,20 @@ export default function Header() {
     navigateToAlbum,
     navigateToArtist,
     navigateToSearch,
-    searchTidal,
-    searchSuggestions,
+    navigateToPlaylist,
+    getSuggestions,
     currentView,
   } = useAudioContext();
 
   const [searchQuery, setSearchQuery] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
-  const [quickResults, setQuickResults] = useState<SearchResults | null>(null);
+  const [textSuggestions, setTextSuggestions] = useState<SuggestionTextItem[]>([]);
+  const [directHits, setDirectHits] = useState<DirectHitItem[]>([]);
   const [searching, setSearching] = useState(false);
   const [searchHistory, setSearchHistory] = useState<string[]>(loadHistory);
-  const [suggestions, setSuggestions] = useState<string[]>([]);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-  const suggestDebounceRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   // Track context menu state
   const [ctxTrack, setCtxTrack] = useState<Track | null>(null);
@@ -70,38 +69,33 @@ export default function Header() {
     }
   }, [currentView]);
 
-  // Debounced quick search
+  // Debounced suggestions fetch — single call powers the entire mini-search dropdown
   const doQuickSearch = useCallback(
     (query: string) => {
       clearTimeout(debounceRef.current);
-      clearTimeout(suggestDebounceRef.current);
       if (!query.trim()) {
-        setQuickResults(null);
+        setTextSuggestions([]);
+        setDirectHits([]);
         setSearching(false);
-        setSuggestions([]);
         return;
       }
       setSearching(true);
       debounceRef.current = setTimeout(() => {
-        searchTidal(query.trim(), 5)
-          .then((results) => {
-            setQuickResults(results);
+        getSuggestions(query.trim(), 10)
+          .then((resp) => {
+            setTextSuggestions(resp.textSuggestions);
+            setDirectHits(resp.directHits);
           })
           .catch(() => {
-            setQuickResults(null);
+            setTextSuggestions([]);
+            setDirectHits([]);
           })
           .finally(() => {
             setSearching(false);
           });
-      }, 300);
-      // Fetch search suggestions with shorter debounce
-      suggestDebounceRef.current = setTimeout(() => {
-        searchSuggestions(query.trim(), 5)
-          .then((s) => setSuggestions(s))
-          .catch(() => setSuggestions([]));
       }, 200);
     },
-    [searchTidal, searchSuggestions]
+    [getSuggestions]
   );
 
   const addToHistory = useCallback((query: string) => {
@@ -144,8 +138,8 @@ export default function Header() {
   const clearSearch = () => {
     setSearchQuery("");
     setSearchOpen(false);
-    setQuickResults(null);
-    setSuggestions([]);
+    setTextSuggestions([]);
+    setDirectHits([]);
     searchInputRef.current?.focus();
   };
 
@@ -165,11 +159,8 @@ export default function Header() {
     return () => document.removeEventListener("mousedown", handler);
   }, []);
 
-  const hasResults =
-    quickResults &&
-    (quickResults.tracks.length > 0 ||
-      quickResults.albums.length > 0 ||
-      quickResults.artists.length > 0);
+  const hasDirectHits = directHits.length > 0;
+  const hasTextSuggestions = textSuggestions.length > 0;
 
   const getHeaderTitle = () => {
     if (currentView.type === "search") {
@@ -178,7 +169,7 @@ export default function Header() {
     return "";
   };
 
-  // History suggestions: filter by typed prefix
+  // Local search history: filter by typed prefix (only shown when no query or no server results)
   const matchingHistory = searchQuery.trim()
     ? searchHistory.filter(
         (h) =>
@@ -187,9 +178,11 @@ export default function Header() {
       )
     : searchHistory;
 
-  const showHistorySection = searchOpen && matchingHistory.length > 0;
-  const showSuggestions = searchOpen && searchQuery.trim() && suggestions.length > 0;
-  const showResultsSection = searchOpen && searchQuery.trim() && (searching || hasResults || quickResults);
+  // When we have server-side suggestions, don't show local history (server returns its own history)
+  const showLocalHistory = searchOpen && !searchQuery.trim() && matchingHistory.length > 0;
+  const showTextSuggestions = searchOpen && searchQuery.trim() && hasTextSuggestions;
+  const showDirectHits = searchOpen && searchQuery.trim() && (searching || hasDirectHits);
+  const showDropdown = showLocalHistory || showTextSuggestions || showDirectHits;
 
   return (
     <div className="h-16 flex items-center justify-between px-6 bg-[#121212] z-30 shrink-0 sticky top-0">
@@ -243,45 +236,18 @@ export default function Header() {
             )}
           </div>
 
-          {/* Search Dropdown */}
-          {searchOpen && (showHistorySection || showSuggestions || showResultsSection) && (
+          {/* Search Dropdown — powered by v2/suggestions/ endpoint */}
+          {showDropdown && (
             <div
               ref={dropdownRef}
               className="absolute right-0 top-full mt-2 w-[420px] bg-[#1a1a1a] rounded-lg shadow-2xl shadow-black/60 border border-white/8 z-50 max-h-[70vh] overflow-y-auto scrollbar-thin scrollbar-thumb-[#333] scrollbar-track-transparent"
             >
-              {/* Server-side search suggestions */}
-              {showSuggestions && (
+              {/* Local history (when input is empty) */}
+              {showLocalHistory && (
                 <div className="py-1">
-                  {suggestions.map((s, i) => (
-                    <button
-                      key={`sug-${i}`}
-                      className="w-full flex items-center gap-3 px-3 py-2.5 hover:bg-white/6 transition-colors text-left"
-                      onClick={() => {
-                        setSearchQuery(s);
-                        setSuggestions([]);
-                        setSearchOpen(false);
-                        addToHistory(s);
-                        navigateToSearch(s);
-                      }}
-                    >
-                      <Search size={15} className="text-[#666] shrink-0" />
-                      <span className="text-[13px] text-white truncate">{s}</span>
-                    </button>
-                  ))}
-                  {(showHistorySection || showResultsSection) && (
-                    <div className="border-b border-white/6 mx-3" />
-                  )}
-                </div>
-              )}
-
-              {/* Search History */}
-              {showHistorySection && (
-                <div className="py-1">
-                  {!searchQuery.trim() && (
-                    <div className="px-3 pt-2 pb-1 text-[11px] text-[#666] uppercase tracking-wider font-medium">
-                      Recent searches
-                    </div>
-                  )}
+                  <div className="px-3 pt-2 pb-1 text-[11px] text-[#666] uppercase tracking-wider font-medium">
+                    Recent searches
+                  </div>
                   {matchingHistory.slice(0, 5).map((item) => (
                     <div
                       key={item}
@@ -311,179 +277,247 @@ export default function Header() {
                       </button>
                     </div>
                   ))}
-                  {showResultsSection && (
+                </div>
+              )}
+
+              {/* Text suggestions (history + autocomplete from server) */}
+              {showTextSuggestions && (
+                <div className="py-1">
+                  {textSuggestions.map((s, i) => (
+                    <button
+                      key={`sug-${i}`}
+                      className="w-full flex items-center gap-3 px-3 py-2.5 hover:bg-white/6 transition-colors text-left"
+                      onClick={() => {
+                        setSearchQuery(s.query);
+                        setTextSuggestions([]);
+                        setDirectHits([]);
+                        setSearchOpen(false);
+                        addToHistory(s.query);
+                        navigateToSearch(s.query);
+                      }}
+                    >
+                      {s.source === "history" ? (
+                        <Clock size={15} className="text-[#666] shrink-0" />
+                      ) : (
+                        <Search size={15} className="text-[#666] shrink-0" />
+                      )}
+                      <span className="text-[13px] text-white truncate">{s.query}</span>
+                      {s.source === "history" && (
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            removeFromHistory(s.query);
+                          }}
+                          className="ml-auto text-[#666] hover:text-white shrink-0 p-0.5"
+                          title="Remove"
+                        >
+                          <X size={14} />
+                        </button>
+                      )}
+                    </button>
+                  ))}
+                  {showDirectHits && (
                     <div className="border-b border-white/6 mx-3" />
                   )}
                 </div>
               )}
 
-              {/* Quick Results */}
-              {showResultsSection && (
+              {/* Direct hits — rendered in exact API order (mixed types) */}
+              {showDirectHits && (
                 <>
-                  {searching && !hasResults && (
+                  {searching && !hasDirectHits && (
                     <div className="flex items-center justify-center py-6">
                       <Loader2 size={18} className="animate-spin text-[#00FFFF]" />
                     </div>
                   )}
 
-                  {!searching && !hasResults && quickResults && (
+                  {!searching && !hasDirectHits && searchQuery.trim() && (
                     <div className="py-6 text-center text-[13px] text-[#666]">
                       No results found
                     </div>
                   )}
 
-                  {hasResults && (
+                  {hasDirectHits && (
                     <div className="py-1">
-                      {/* Render sections ordered by topHitType for relevance */}
-                      {(() => {
-                        const topHit = quickResults!.topHitType?.toUpperCase();
-                        type SectionType = "tracks" | "albums" | "artists";
-                        const defaultOrder: SectionType[] = ["tracks", "albums", "artists"];
-                        const order = topHit === "ARTISTS"
-                          ? (["artists", "tracks", "albums"] as SectionType[])
-                          : topHit === "ALBUMS"
-                            ? (["albums", "tracks", "artists"] as SectionType[])
-                            : defaultOrder;
-
-                        return order.map((section) => {
-                          if (section === "tracks" && quickResults!.tracks.length > 0) {
-                            return quickResults!.tracks.map((track, idx) => (
-                              <div
-                                key={`t-${track.id}`}
-                                className="flex items-center gap-3 px-3 py-3 hover:bg-white/6 transition-colors text-left group/track"
-                                onContextMenu={(e) => {
-                                  e.preventDefault();
-                                  e.stopPropagation();
-                                  setCtxPos({ x: e.clientX, y: e.clientY });
-                                  setCtxTrackIndex(idx);
-                                  setCtxTrack(track);
-                                }}
-                              >
-                                <button
-                                  className="flex-1 flex items-center gap-3 min-w-0"
-                                  onClick={() => {
-                                    setSearchOpen(false);
-                                    setQueueTracks([]);
-                                    playTrack(track);
-                                  }}
-                                >
-                                  <div className="w-12 h-12 rounded bg-[#282828] overflow-hidden shrink-0">
-                                    <TidalImage
-                                      src={getTidalImageUrl(track.album?.cover, 80)}
-                                      alt={track.title}
-                                      className="w-full h-full"
-                                    />
-                                  </div>
-                                  <div className="flex-1 min-w-0 text-left">
-                                    <p className="text-[14px] text-white truncate">
-                                      {track.title}
-                                    </p>
-                                    <p className="text-[11px] text-[#808080] truncate">
-                                      Track &middot;{" "}
-                                      {track.artist?.name || "Unknown Artist"}
-                                    </p>
-                                  </div>
-                                </button>
-                                <button
-                                  ref={(el) => {
-                                    if (el) dotsRefs.current.set(track.id, el);
-                                    else dotsRefs.current.delete(track.id);
-                                  }}
-                                  className="p-1 rounded-full text-[#666] hover:text-white opacity-0 group-hover/track:opacity-100 transition-opacity shrink-0"
-                                  title="More options"
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    setCtxPos(undefined);
-                                    setCtxTrackIndex(idx);
-                                    setCtxTrack((prev) => (prev?.id === track.id ? null : track));
-                                  }}
-                                >
-                                  <MoreHorizontal size={16} />
-                                </button>
-                                {ctxTrack?.id === track.id && (
-                                  <TrackContextMenu
-                                    track={track}
-                                    index={ctxTrackIndex}
-                                    anchorRef={{ current: dotsRefs.current.get(track.id) ?? null }}
-                                    cursorPosition={ctxPos}
-                                    onClose={() => setCtxTrack(null)}
+                      {directHits.map((hit, idx) => {
+                        if (hit.hitType === "ARTISTS") {
+                          return (
+                            <button
+                              key={`dh-${idx}`}
+                              onClick={() => {
+                                setSearchOpen(false);
+                                if (hit.id) navigateToArtist(hit.id, {
+                                  name: hit.name || "",
+                                  picture: hit.picture,
+                                });
+                              }}
+                              className="w-full flex items-center gap-3 px-3 py-3 hover:bg-white/6 transition-colors text-left"
+                            >
+                              <div className="w-12 h-12 rounded-full bg-[#282828] overflow-hidden shrink-0">
+                                {hit.picture ? (
+                                  <TidalImage
+                                    src={getTidalImageUrl(hit.picture, 80)}
+                                    alt={hit.name || ""}
+                                    className="w-full h-full object-cover"
                                   />
+                                ) : (
+                                  <div className="w-full h-full flex items-center justify-center">
+                                    <span className="text-[12px] font-bold text-[#666]">
+                                      {(hit.name || "?").charAt(0)}
+                                    </span>
+                                  </div>
                                 )}
                               </div>
-                            ));
-                          }
-                          if (section === "albums" && quickResults!.albums.length > 0) {
-                            return quickResults!.albums.map((album) => (
+                              <div className="flex-1 min-w-0">
+                                <p className="text-[14px] text-white truncate font-medium">
+                                  {hit.name}
+                                </p>
+                                <p className="text-[11px] text-[#808080]">Artist</p>
+                              </div>
+                              <MoreHorizontal size={16} className="text-[#666] shrink-0" />
+                            </button>
+                          );
+                        }
+                        if (hit.hitType === "ALBUMS") {
+                          return (
+                            <button
+                              key={`dh-${idx}`}
+                              onClick={() => {
+                                setSearchOpen(false);
+                                if (hit.id) navigateToAlbum(hit.id, {
+                                  title: hit.title || "",
+                                  cover: hit.cover,
+                                  artistName: hit.artistName,
+                                });
+                              }}
+                              className="w-full flex items-center gap-3 px-3 py-3 hover:bg-white/6 transition-colors text-left"
+                            >
+                              <div className="w-12 h-12 rounded bg-[#282828] overflow-hidden shrink-0">
+                                <TidalImage
+                                  src={getTidalImageUrl(hit.cover, 80)}
+                                  alt={hit.title || ""}
+                                  className="w-full h-full"
+                                />
+                              </div>
+                              <div className="flex-1 min-w-0">
+                                <p className="text-[14px] text-white truncate">
+                                  {hit.title}
+                                </p>
+                                <p className="text-[11px] text-[#808080] truncate">
+                                  Album &middot; {hit.artistName || "Unknown"}
+                                </p>
+                              </div>
+                              <MoreHorizontal size={16} className="text-[#666] shrink-0" />
+                            </button>
+                          );
+                        }
+                        if (hit.hitType === "TRACKS") {
+                          // Build a minimal Track object for playback and context menu
+                          const trackObj: Track = {
+                            id: hit.id || 0,
+                            title: hit.title || "",
+                            duration: hit.duration || 0,
+                            artist: hit.artistName ? { id: 0, name: hit.artistName } : undefined,
+                            album: hit.albumId ? { id: hit.albumId, title: hit.albumTitle || "", cover: hit.albumCover } : undefined,
+                          };
+                          return (
+                            <div
+                              key={`dh-${idx}`}
+                              className="flex items-center gap-3 px-3 py-3 hover:bg-white/6 transition-colors text-left group/track"
+                              onContextMenu={(e) => {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                setCtxPos({ x: e.clientX, y: e.clientY });
+                                setCtxTrackIndex(idx);
+                                setCtxTrack(trackObj);
+                              }}
+                            >
                               <button
-                                key={`a-${album.id}`}
+                                className="flex-1 flex items-center gap-3 min-w-0"
                                 onClick={() => {
                                   setSearchOpen(false);
-                                  navigateToAlbum(album.id, {
-                                    title: album.title,
-                                    cover: album.cover,
-                                    artistName: album.artist?.name,
-                                  });
+                                  setQueueTracks([]);
+                                  playTrack(trackObj);
                                 }}
-                                className="w-full flex items-center gap-3 px-3 py-3 hover:bg-white/6 transition-colors text-left"
                               >
                                 <div className="w-12 h-12 rounded bg-[#282828] overflow-hidden shrink-0">
                                   <TidalImage
-                                    src={getTidalImageUrl(album.cover, 80)}
-                                    alt={album.title}
+                                    src={getTidalImageUrl(hit.albumCover, 80)}
+                                    alt={hit.title || ""}
                                     className="w-full h-full"
                                   />
                                 </div>
-                                <div className="flex-1 min-w-0">
+                                <div className="flex-1 min-w-0 text-left">
                                   <p className="text-[14px] text-white truncate">
-                                    {album.title}
+                                    {hit.title}
                                   </p>
                                   <p className="text-[11px] text-[#808080] truncate">
-                                    Album &middot; {album.artist?.name || "Unknown"}
+                                    Track &middot; {hit.artistName || "Unknown Artist"}
                                   </p>
                                 </div>
                               </button>
-                            ));
-                          }
-                          if (section === "artists" && quickResults!.artists.length > 0) {
-                            return quickResults!.artists.map((artist) => (
                               <button
-                                key={`ar-${artist.id}`}
-                                onClick={() => {
-                                  setSearchOpen(false);
-                                  navigateToArtist(artist.id, {
-                                    name: artist.name,
-                                    picture: artist.picture,
-                                  });
+                                ref={(el) => {
+                                  if (el) dotsRefs.current.set(hit.id || 0, el);
+                                  else dotsRefs.current.delete(hit.id || 0);
                                 }}
-                                className="w-full flex items-center gap-3 px-3 py-3 hover:bg-white/6 transition-colors text-left"
+                                className="p-1 rounded-full text-[#666] hover:text-white opacity-0 group-hover/track:opacity-100 transition-opacity shrink-0"
+                                title="More options"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setCtxPos(undefined);
+                                  setCtxTrackIndex(idx);
+                                  setCtxTrack((prev) => (prev?.id === trackObj.id ? null : trackObj));
+                                }}
                               >
-                                <div className="w-12 h-12 rounded-full bg-[#282828] overflow-hidden shrink-0">
-                                  {artist.picture ? (
-                                    <TidalImage
-                                      src={getTidalImageUrl(artist.picture, 80)}
-                                      alt={artist.name}
-                                      className="w-full h-full object-cover"
-                                    />
-                                  ) : (
-                                    <div className="w-full h-full flex items-center justify-center">
-                                      <span className="text-[12px] font-bold text-[#666]">
-                                        {artist.name.charAt(0)}
-                                      </span>
-                                    </div>
-                                  )}
-                                </div>
-                                <div className="flex-1 min-w-0">
-                                  <p className="text-[14px] text-white truncate">
-                                    {artist.name}
-                                  </p>
-                                  <p className="text-[11px] text-[#808080]">Artist</p>
-                                </div>
+                                <MoreHorizontal size={16} />
                               </button>
-                            ));
-                          }
-                          return null;
-                        });
-                      })()}
+                              {ctxTrack?.id === trackObj.id && (
+                                <TrackContextMenu
+                                  track={trackObj}
+                                  index={ctxTrackIndex}
+                                  anchorRef={{ current: dotsRefs.current.get(trackObj.id) ?? null }}
+                                  cursorPosition={ctxPos}
+                                  onClose={() => setCtxTrack(null)}
+                                />
+                              )}
+                            </div>
+                          );
+                        }
+                        if (hit.hitType === "PLAYLISTS") {
+                          return (
+                            <button
+                              key={`dh-${idx}`}
+                              onClick={() => {
+                                setSearchOpen(false);
+                                if (hit.uuid) navigateToPlaylist(hit.uuid, {
+                                  title: hit.title || "",
+                                  image: hit.image,
+                                });
+                              }}
+                              className="w-full flex items-center gap-3 px-3 py-3 hover:bg-white/6 transition-colors text-left"
+                            >
+                              <div className="w-12 h-12 rounded bg-[#282828] overflow-hidden shrink-0">
+                                <TidalImage
+                                  src={getTidalImageUrl(hit.image, 80)}
+                                  alt={hit.title || ""}
+                                  className="w-full h-full"
+                                />
+                              </div>
+                              <div className="flex-1 min-w-0">
+                                <p className="text-[14px] text-white truncate">
+                                  {hit.title}
+                                </p>
+                                <p className="text-[11px] text-[#808080] truncate">
+                                  Playlist{hit.numberOfTracks ? ` · ${hit.numberOfTracks} tracks` : ""}
+                                </p>
+                              </div>
+                              <MoreHorizontal size={16} className="text-[#666] shrink-0" />
+                            </button>
+                          );
+                        }
+                        return null;
+                      })}
 
                       {/* View all */}
                       <button

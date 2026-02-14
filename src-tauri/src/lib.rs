@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use tauri::State;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tidal_api::{AuthTokens, DeviceAuthResponse, HomePageResponse, PaginatedTracks, StreamInfo, TidalAlbumDetail, TidalArtistDetail, TidalClient, TidalCredit, TidalLyrics, TidalPlaylist, TidalSearchResults, TidalTrack};
+use tidal_api::{AuthTokens, DeviceAuthResponse, HomePageResponse, PaginatedTracks, StreamInfo, SuggestionsResponse, TidalAlbumDetail, TidalArtistDetail, TidalClient, TidalCredit, TidalLyrics, TidalPlaylist, TidalSearchResults, TidalTrack};
 
 
 #[tauri::command]
@@ -618,9 +618,9 @@ fn search_tidal(state: State<AppState>, query: String, limit: u32) -> Result<Tid
 }
 
 #[tauri::command(rename_all = "camelCase")]
-fn search_suggestions(state: State<AppState>, query: String, limit: u32) -> Vec<String> {
+fn get_suggestions(state: State<AppState>, query: String, limit: u32) -> SuggestionsResponse {
     let client = state.tidal_client.lock().unwrap();
-    client.search_suggestions(&query, limit)
+    client.get_suggestions(&query, limit)
 }
 
 // ==================== Home Page & Pages API ====================
@@ -992,7 +992,7 @@ pub fn run() {
             get_album_tracks,
             get_stream_url,
             search_tidal,
-            search_suggestions,
+            get_suggestions,
             get_track_lyrics,
             get_track_credits,
             get_track_radio,

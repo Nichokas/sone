@@ -60,12 +60,28 @@ pub struct TidalAlbumDetail {
     pub cover: Option<String>,
     #[serde(default)]
     pub artist: Option<TidalArtist>,
+    /// v2 API returns "artists" (plural array) instead of "artist" (singular)
+    #[serde(default)]
+    pub artists: Option<Vec<TidalArtist>>,
     #[serde(default)]
     pub number_of_tracks: Option<u32>,
     #[serde(default)]
     pub duration: Option<u32>,
     #[serde(default)]
     pub release_date: Option<String>,
+}
+
+impl TidalAlbumDetail {
+    /// Backfill `artist` from `artists[0]` if `artist` is None (v2 API uses plural `artists`)
+    pub fn backfill_artist(&mut self) {
+        if self.artist.is_none() {
+            if let Some(ref artists) = self.artists {
+                if let Some(first) = artists.first() {
+                    self.artist = Some(first.clone());
+                }
+            }
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -204,6 +220,61 @@ pub struct TidalSearchResults {
     pub top_hit_type: Option<String>,
 }
 
+// ==================== Suggestions / Mini-search ====================
+
+/// A single direct hit from the v2 /suggestions/ endpoint.
+/// Each hit is a typed entity (artist, album, track, playlist) rendered in API order.
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectHitItem {
+    pub hit_type: String, // "ARTISTS", "ALBUMS", "TRACKS", "PLAYLISTS"
+    // Common
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uuid: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub picture: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cover: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+    // For tracks/albums: artist info
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artist_name: Option<String>,
+    // For tracks: album info
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub album_id: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub album_title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub album_cover: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub number_of_tracks: Option<u32>,
+}
+
+/// A text suggestion item (history or autocomplete).
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SuggestionTextItem {
+    pub query: String,
+    pub source: String, // "history" or "suggestion"
+}
+
+/// Full response from the suggestions endpoint, powering the mini-search dropdown.
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SuggestionsResponse {
+    pub text_suggestions: Vec<SuggestionTextItem>,
+    pub direct_hits: Vec<DirectHitItem>,
+}
+
 // ==================== Home Page / Pages API ====================
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -227,7 +298,7 @@ pub struct HomePageSection {
     pub api_path: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct HomePageResponse {
     pub sections: Vec<HomePageSection>,
@@ -1494,9 +1565,12 @@ impl TidalClient {
         let mut tracks = data.tracks.map(|s| s.items).unwrap_or_default();
         for t in &mut tracks { t.backfill_artist(); }
 
+        let mut albums = data.albums.map(|s| s.items).unwrap_or_default();
+        for a in &mut albums { a.backfill_artist(); }
+
         Ok(TidalSearchResults {
             artists: data.artists.map(|s| s.items).unwrap_or_default(),
-            albums: data.albums.map(|s| s.items).unwrap_or_default(),
+            albums,
             tracks,
             playlists: data.playlists
                 .map(|s| s.items.into_iter().map(|p| p.into()).collect())
@@ -1505,110 +1579,306 @@ impl TidalClient {
         })
     }
 
-    /// Fetch autocomplete search suggestions from Tidal.
-    /// Tries /search/top-hits first, then falls back to extracting from /search.
-    /// Returns a list of suggestion strings.
-    pub fn search_suggestions(&self, query: &str, limit: u32) -> Vec<String> {
+    /// Fetch suggestions from Tidal's v2 /suggestions/ endpoint.
+    /// Returns a SuggestionsResponse with text suggestions AND direct hit entities,
+    /// exactly as the webapp's mini-search dropdown uses.
+    pub fn get_suggestions(&self, query: &str, limit: u32) -> SuggestionsResponse {
+        let empty = SuggestionsResponse { text_suggestions: vec![], direct_hits: vec![] };
+        let tokens = match self.tokens.as_ref() {
+            Some(t) => t,
+            None => return empty,
+        };
+
+        let url = format!("{}/suggestions/", TIDAL_API_V2_URL);
+        let resp = self.client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", tokens.access_token))
+            .query(&[
+                ("query", query),
+                ("countryCode", self.country_code.as_str()),
+                ("explicit", "true"),
+                ("hybrid", "true"),
+            ])
+            .send();
+
+        match &resp {
+            Ok(r) => eprintln!("DEBUG suggestions v2: HTTP {} for '{}'", r.status(), query),
+            Err(e) => {
+                eprintln!("DEBUG suggestions v2: error: {} for '{}'", e, query);
+                return empty;
+            }
+        }
+
+        if let Ok(r) = resp {
+            if r.status().is_success() {
+                let body = r.text().unwrap_or_default();
+                if let Some(result) = Self::parse_v2_suggestions_full(&body, limit) {
+                    eprintln!("DEBUG suggestions v2: {} text, {} hits for '{}'",
+                        result.text_suggestions.len(), result.direct_hits.len(), query);
+                    return result;
+                }
+            }
+        }
+
+        empty
+    }
+
+    /// Parse the full v2 /suggestions/ response into SuggestionsResponse.
+    /// Preserves directHits in exact API order (mixed entity types).
+    fn parse_v2_suggestions_full(body: &str, limit: u32) -> Option<SuggestionsResponse> {
+        let json: serde_json::Value = serde_json::from_str(body).ok()?;
+
+        let mut text_suggestions = Vec::new();
+
+        // Extract history items (source = "history")
+        if let Some(arr) = json.get("history").and_then(|v| v.as_array()) {
+            for item in arr {
+                if let Some(q) = item.get("query").and_then(|v| v.as_str()) {
+                    text_suggestions.push(SuggestionTextItem {
+                        query: q.to_string(),
+                        source: "history".to_string(),
+                    });
+                }
+            }
+        }
+
+        // Extract suggestion items (source = "suggestion")
+        if let Some(arr) = json.get("suggestions").and_then(|v| v.as_array()) {
+            for item in arr {
+                if let Some(q) = item.get("query").and_then(|v| v.as_str()) {
+                    text_suggestions.push(SuggestionTextItem {
+                        query: q.to_string(),
+                        source: "suggestion".to_string(),
+                    });
+                }
+            }
+        }
+
+        text_suggestions.truncate(limit as usize);
+
+        // Extract directHits in exact API order
+        let mut direct_hits = Vec::new();
+        if let Some(arr) = json.get("directHits").and_then(|v| v.as_array()) {
+            for item in arr {
+                let hit_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let val = match item.get("value") {
+                    Some(v) => v,
+                    None => continue,
+                };
+
+                let hit = match hit_type.as_str() {
+                    "ARTISTS" => DirectHitItem {
+                        hit_type,
+                        id: val.get("id").and_then(|v| v.as_u64()),
+                        uuid: None,
+                        name: val.get("name").and_then(|v| v.as_str()).map(String::from),
+                        title: None,
+                        picture: val.get("picture").and_then(|v| v.as_str()).map(String::from),
+                        cover: None,
+                        image: None,
+                        artist_name: None,
+                        album_id: None,
+                        album_title: None,
+                        album_cover: None,
+                        duration: None,
+                        number_of_tracks: None,
+                    },
+                    "ALBUMS" => {
+                        let artist_name = val.get("artists")
+                            .and_then(|a| a.as_array())
+                            .and_then(|arr| arr.first())
+                            .and_then(|a| a.get("name").and_then(|v| v.as_str()))
+                            .or_else(|| val.get("artist").and_then(|a| a.get("name").and_then(|v| v.as_str())))
+                            .map(String::from);
+                        DirectHitItem {
+                            hit_type,
+                            id: val.get("id").and_then(|v| v.as_u64()),
+                            uuid: None,
+                            name: None,
+                            title: val.get("title").and_then(|v| v.as_str()).map(String::from),
+                            picture: None,
+                            cover: val.get("cover").and_then(|v| v.as_str()).map(String::from),
+                            image: None,
+                            artist_name,
+                            album_id: None,
+                            album_title: None,
+                            album_cover: None,
+                            duration: val.get("duration").and_then(|v| v.as_u64()).map(|d| d as u32),
+                            number_of_tracks: val.get("numberOfTracks").and_then(|v| v.as_u64()).map(|n| n as u32),
+                        }
+                    },
+                    "TRACKS" => {
+                        let artist_name = val.get("artists")
+                            .and_then(|a| a.as_array())
+                            .and_then(|arr| arr.first())
+                            .and_then(|a| a.get("name").and_then(|v| v.as_str()))
+                            .or_else(|| val.get("artist").and_then(|a| a.get("name").and_then(|v| v.as_str())))
+                            .map(String::from);
+                        let album = val.get("album");
+                        DirectHitItem {
+                            hit_type,
+                            id: val.get("id").and_then(|v| v.as_u64()),
+                            uuid: None,
+                            name: None,
+                            title: val.get("title").and_then(|v| v.as_str()).map(String::from),
+                            picture: None,
+                            cover: None,
+                            image: None,
+                            artist_name,
+                            album_id: album.and_then(|a| a.get("id").and_then(|v| v.as_u64())),
+                            album_title: album.and_then(|a| a.get("title").and_then(|v| v.as_str())).map(String::from),
+                            album_cover: album.and_then(|a| a.get("cover").and_then(|v| v.as_str())).map(String::from),
+                            duration: val.get("duration").and_then(|v| v.as_u64()).map(|d| d as u32),
+                            number_of_tracks: None,
+                        }
+                    },
+                    "PLAYLISTS" => {
+                        DirectHitItem {
+                            hit_type,
+                            id: None,
+                            uuid: val.get("uuid").and_then(|v| v.as_str()).map(String::from),
+                            name: None,
+                            title: val.get("title").and_then(|v| v.as_str()).map(String::from),
+                            picture: None,
+                            cover: None,
+                            image: val.get("squareImage").and_then(|v| v.as_str())
+                                .or_else(|| val.get("image").and_then(|v| v.as_str()))
+                                .map(String::from),
+                            artist_name: None,
+                            album_id: None,
+                            album_title: None,
+                            album_cover: None,
+                            duration: None,
+                            number_of_tracks: val.get("numberOfTracks").and_then(|v| v.as_u64()).map(|n| n as u32),
+                        }
+                    },
+                    _ => continue,
+                };
+                direct_hits.push(hit);
+            }
+        }
+
+        Some(SuggestionsResponse { text_suggestions, direct_hits })
+    }
+
+    // ==================== Home Page (Pages API) ====================
+
+    /// Fetch the v2 home feed from api.tidal.com/v2/home/feed/static.
+    /// Returns parsed sections, or empty vec on failure.
+    fn fetch_v2_home_feed(&self) -> Vec<HomePageSection> {
         let tokens = match self.tokens.as_ref() {
             Some(t) => t,
             None => return vec![],
         };
 
-        // Helper: extract items from a Tidal search-style section
-        // Tidal wraps categories as { "artists": { "items": [...] }, "tracks": { "items": [...] } }
-        fn extract_names(json: &serde_json::Value, section: &str, field: &str) -> Vec<String> {
-            json.get(section)
-                .and_then(|v| {
-                    // Try { items: [...] } wrapper first, then flat array
-                    v.get("items").and_then(|i| i.as_array()).or_else(|| v.as_array())
-                })
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|item| item.get(field).and_then(|v| v.as_str()).map(String::from))
-                        .collect()
-                })
-                .unwrap_or_default()
-        }
-
-        // Try /search/top-hits first
-        let response = self
-            .client
-            .get(format!("{}/search/top-hits", TIDAL_API_URL))
+        let resp = self.client
+            .get(format!("{}/home/feed/static", TIDAL_API_V2_URL))
             .header("Authorization", format!("Bearer {}", tokens.access_token))
             .query(&[
-                ("query", query),
                 ("countryCode", self.country_code.as_str()),
-                ("limit", &limit.to_string()),
+                ("locale", "en_US"),
+                ("deviceType", "BROWSER"),
+                ("platform", "WEB"),
             ])
             .send();
 
-        if let Ok(resp) = response {
-            if resp.status().is_success() {
-                let body = resp.text().unwrap_or_default();
-                eprintln!("DEBUG search_suggestions top-hits response (first 500 chars): {}", &body[..body.len().min(500)]);
-                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
-                    let mut suggestions: Vec<String> = Vec::new();
-
-                    // Format: { "suggestions": ["str1", "str2"] }
-                    if let Some(arr) = json.get("suggestions").and_then(|v| v.as_array()) {
-                        for item in arr {
-                            if let Some(s) = item.as_str() {
-                                suggestions.push(s.to_string());
-                            }
-                        }
+        match resp {
+            Ok(r) if r.status().is_success() => {
+                let body = r.text().unwrap_or_default();
+                match serde_json::from_str::<Value>(&body) {
+                    Ok(json) => {
+                        let result = Self::parse_page_response(&json).unwrap_or_default();
+                        result.sections
                     }
-
-                    // Try extracting from wrapped items if no direct suggestions
-                    if suggestions.is_empty() {
-                        suggestions.extend(extract_names(&json, "artists", "name"));
-                        suggestions.extend(extract_names(&json, "tracks", "title"));
-                        suggestions.extend(extract_names(&json, "albums", "title"));
-                        suggestions.extend(extract_names(&json, "playlists", "title"));
-                    }
-
-                    if !suggestions.is_empty() {
-                        suggestions.truncate(limit as usize);
-                        return suggestions;
+                    Err(e) => {
+                        eprintln!("DEBUG v2 home feed: parse error: {}", e);
+                        vec![]
                     }
                 }
-            } else {
-                eprintln!("DEBUG search_suggestions top-hits failed: {}", resp.status());
+            }
+            Ok(r) => {
+                eprintln!("DEBUG v2 home feed: HTTP {}", r.status());
+                vec![]
+            }
+            Err(e) => {
+                eprintln!("DEBUG v2 home feed: request error: {}", e);
+                vec![]
             }
         }
-
-        // Fallback: use the regular /search endpoint and extract top names as suggestions
-        let response = self
-            .client
-            .get(format!("{}/search", TIDAL_API_URL))
-            .header("Authorization", format!("Bearer {}", tokens.access_token))
-            .query(&[
-                ("query", query),
-                ("countryCode", self.country_code.as_str()),
-                ("limit", &limit.to_string()),
-                ("offset", "0"),
-                ("types", "ARTISTS,ALBUMS,TRACKS,PLAYLISTS"),
-            ])
-            .send();
-
-        if let Ok(resp) = response {
-            if resp.status().is_success() {
-                let body = resp.text().unwrap_or_default();
-                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
-                    let mut suggestions: Vec<String> = Vec::new();
-                    suggestions.extend(extract_names(&json, "artists", "name"));
-                    suggestions.extend(extract_names(&json, "tracks", "title"));
-                    suggestions.extend(extract_names(&json, "albums", "title"));
-                    suggestions.extend(extract_names(&json, "playlists", "title"));
-                    suggestions.truncate(limit as usize);
-                    return suggestions;
-                }
-            }
-        }
-
-        vec![]
     }
 
-    // ==================== Home Page (Pages API) ====================
+    /// Fetch feed activities from the v2 API (recently played, etc.).
+    /// Returns a "Recently played" section, or empty vec on failure.
+    fn fetch_v2_feed_activities(&self) -> Vec<HomePageSection> {
+        let tokens = match self.tokens.as_ref() {
+            Some(t) => t,
+            None => return vec![],
+        };
+
+        let user_id = match tokens.user_id {
+            Some(id) => id.to_string(),
+            None => return vec![],
+        };
+
+        let resp = self.client
+            .get(format!("{}/feed/activities", TIDAL_API_V2_URL))
+            .header("Authorization", format!("Bearer {}", tokens.access_token))
+            .query(&[
+                ("userId", user_id.as_str()),
+                ("limit", "9"),
+                ("countryCode", self.country_code.as_str()),
+                ("locale", "en_US"),
+                ("deviceType", "BROWSER"),
+            ])
+            .send();
+
+        match resp {
+            Ok(r) if r.status().is_success() => {
+                let body = r.text().unwrap_or_default();
+                match serde_json::from_str::<Value>(&body) {
+                    Ok(json) => {
+                        // The activities response may contain items with track/album/playlist data.
+                        // Try parsing as page response first.
+                        if let Ok(result) = Self::parse_page_response(&json) {
+                            if !result.sections.is_empty() {
+                                eprintln!("DEBUG v2 feed activities: got {} sections", result.sections.len());
+                                return result.sections;
+                            }
+                        }
+
+                        // Fallback: extract items array directly as a "Recently played" section
+                        if let Some(items) = json.get("items").and_then(|v| v.as_array()) {
+                            if !items.is_empty() {
+                                eprintln!("DEBUG v2 feed activities: got {} raw items", items.len());
+                                return vec![HomePageSection {
+                                    title: "Recently played".to_string(),
+                                    section_type: "MIXED_LIST".to_string(),
+                                    items: Value::Array(items.clone()),
+                                    has_more: false,
+                                    api_path: None,
+                                }];
+                            }
+                        }
+
+                        eprintln!("DEBUG v2 feed activities: no usable data");
+                        vec![]
+                    }
+                    Err(e) => {
+                        eprintln!("DEBUG v2 feed activities: parse error: {}", e);
+                        vec![]
+                    }
+                }
+            }
+            Ok(r) => {
+                eprintln!("DEBUG v2 feed activities: HTTP {}", r.status());
+                vec![]
+            }
+            Err(e) => {
+                eprintln!("DEBUG v2 feed activities: request error: {}", e);
+                vec![]
+            }
+        }
+    }
 
     /// Fetch a single page endpoint. Handles both V1 and V2 response formats.
     fn fetch_page_endpoint(&self, endpoint: &str) -> Result<Vec<HomePageSection>, String> {
@@ -1692,10 +1962,18 @@ impl TidalClient {
     }
 
     /// Fetch the full home page by calling multiple Tidal page endpoints.
-    /// The Tidal web app builds its home view from several endpoints, not just /pages/home.
+    /// Tries the v2 home/feed/static endpoint first (what the web app uses),
+    /// then falls back to the multi-endpoint v1 approach.
     pub fn get_home_page(&self) -> Result<HomePageResponse, String> {
         let mut all_sections = Vec::new();
         let mut seen_titles = std::collections::HashSet::new();
+
+        // Try v2 home feed first (single endpoint, what the web app uses)
+        let v2_sections = self.fetch_v2_home_feed();
+        if !v2_sections.is_empty() {
+            eprintln!("DEBUG [v2 home/feed/static]: got {} sections", v2_sections.len());
+            Self::add_unique_sections(&mut all_sections, &mut seen_titles, v2_sections);
+        }
 
         // Primary home endpoint - has core sections like New Albums, The Hits, etc.
         let home_sections = self.fetch_page_endpoint("pages/home")?;
@@ -1722,9 +2000,10 @@ impl TidalClient {
             }
         }
 
-        // Recently played / listening history
-        if let Ok(sections) = self.fetch_page_endpoint("pages/my_collection_recently_played") {
-            Self::add_unique_sections(&mut all_sections, &mut seen_titles, sections);
+        // Recently played / listening history via v2 feed activities
+        let activity_sections = self.fetch_v2_feed_activities();
+        if !activity_sections.is_empty() {
+            Self::add_unique_sections(&mut all_sections, &mut seen_titles, activity_sections);
         }
 
         // Video content endpoint - disabled for now since the app can't play video
