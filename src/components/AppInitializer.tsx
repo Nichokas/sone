@@ -372,6 +372,12 @@ export function AppInitializer() {
           e.preventDefault();
           setDrawerOpen(false);
           break;
+        case "Slash":
+          if (e.shiftKey) {
+            e.preventDefault();
+            window.dispatchEvent(new CustomEvent("toggle-shortcuts"));
+          }
+          break;
       }
     };
 

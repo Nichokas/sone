@@ -1,7 +1,6 @@
 import {
   Play,
   Music,
-  Loader2,
   Search,
   MoreHorizontal,
   User,
@@ -22,6 +21,7 @@ import {
 import TidalImage from "./TidalImage";
 import MediaContextMenu from "./MediaContextMenu";
 import ReusableTrackList from "./TrackList";
+import { SearchPageSkeleton } from "./PageSkeleton";
 
 type SearchTab =
   | "all"
@@ -131,14 +131,7 @@ export default function SearchView({ query, onBack }: SearchViewProps) {
   };
 
   if (loading) {
-    return (
-      <div className="flex-1 bg-linear-to-b from-th-surface to-th-base flex items-center justify-center">
-        <div className="flex flex-col items-center gap-4">
-          <Loader2 size={28} className="animate-spin text-th-accent" />
-          <p className="text-th-text-muted text-sm">Searching for "{query}"...</p>
-        </div>
-      </div>
-    );
+    return <SearchPageSkeleton />;
   }
 
   if (error) {

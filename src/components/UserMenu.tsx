@@ -1,14 +1,36 @@
-import { LogOut, Palette, RefreshCw, User } from "lucide-react";
+import { LogOut, Palette, RefreshCw, User, Keyboard, X } from "lucide-react";
 import { useState, useEffect, useRef } from "react";
 import { useAuth } from "../hooks/useAuth";
 import { clearCache } from "../api/tidal";
 import ThemeEditor from "./ThemeEditor";
 
+const SHORTCUTS = [
+  { keys: "Space", desc: "Play / Pause" },
+  { keys: "Ctrl + →", desc: "Next track" },
+  { keys: "Ctrl + ←", desc: "Previous track" },
+  { keys: "↑", desc: "Volume up" },
+  { keys: "↓", desc: "Volume down" },
+  { keys: "M", desc: "Mute / Unmute" },
+  { keys: "L", desc: "Like / Unlike current track" },
+  { keys: "Ctrl + S", desc: "Focus search bar" },
+  { keys: "Ctrl + R", desc: "Refresh app data" },
+  { keys: "Esc", desc: "Close now-playing drawer" },
+  { keys: "?", desc: "Show keyboard shortcuts" },
+] as const;
+
 export default function UserMenu() {
   const { userName, logout } = useAuth();
   const [open, setOpen] = useState(false);
   const [themeOpen, setThemeOpen] = useState(false);
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
+
+  // Toggle shortcuts modal from ? key
+  useEffect(() => {
+    const handler = () => setShortcutsOpen((prev) => !prev);
+    window.addEventListener("toggle-shortcuts", handler);
+    return () => window.removeEventListener("toggle-shortcuts", handler);
+  }, []);
 
   // Close on click outside
   useEffect(() => {
@@ -73,6 +95,18 @@ export default function UserMenu() {
             Refresh App
           </button>
 
+          {/* Shortcuts */}
+          <button
+            onClick={() => {
+              setOpen(false);
+              setShortcutsOpen(true);
+            }}
+            className="w-full flex items-center gap-3 px-4 py-2.5 text-[13px] text-th-text-secondary hover:text-white hover:bg-th-border-subtle transition-colors"
+          >
+            <Keyboard size={16} />
+            Shortcuts
+          </button>
+
           {/* Logout */}
           <button
             onClick={() => {
@@ -88,6 +122,46 @@ export default function UserMenu() {
       )}
 
       <ThemeEditor open={themeOpen} onClose={() => setThemeOpen(false)} />
+
+      {/* Shortcuts modal */}
+      {shortcutsOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
+          onClick={() => setShortcutsOpen(false)}
+        >
+          <div
+            className="bg-th-elevated rounded-xl shadow-2xl w-[420px] max-h-[80vh] flex flex-col overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+            style={{ animation: "slideUp 0.2s ease-out" }}
+          >
+            {/* Header */}
+            <div className="flex items-center justify-between px-5 pt-5 pb-3">
+              <h2 className="text-[16px] font-bold text-white">Keyboard Shortcuts</h2>
+              <button
+                onClick={() => setShortcutsOpen(false)}
+                className="w-8 h-8 rounded-full flex items-center justify-center hover:bg-th-inset transition-colors text-th-text-muted hover:text-white"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            {/* Shortcut list */}
+            <div className="px-5 pb-5 flex flex-col gap-1">
+              {SHORTCUTS.map((s) => (
+                <div
+                  key={s.keys}
+                  className="flex items-center justify-between py-2 px-1"
+                >
+                  <span className="text-[13px] text-th-text-secondary">{s.desc}</span>
+                  <kbd className="text-[12px] font-mono text-th-text-muted bg-th-surface px-2.5 py-1 rounded-md border border-th-border-subtle">
+                    {s.keys}
+                  </kbd>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
