@@ -5,6 +5,7 @@ import { isAuthenticatedAtom, authTokensAtom, userNameAtom } from "../atoms/auth
 import { userPlaylistsAtom, favoritePlaylistsAtom } from "../atoms/playlists";
 import { isPlayingAtom, currentTrackAtom, queueAtom, historyAtom } from "../atoms/playback";
 import { favoriteTrackIdsAtom } from "../atoms/favorites";
+import { clearCache } from "../api/tidal";
 import type { AuthTokens, PkceAuthParams, DeviceAuthResponse, Playlist } from "../types";
 
 const PLAYBACK_STATE_KEY = "tide-vibe.playback-state.v1";
@@ -169,6 +170,7 @@ export function useAuth() {
   const logout = useCallback(async () => {
     try {
       await invoke("logout");
+      clearCache();
       setAuthTokens(null);
       setIsAuthenticated(false);
       setUserPlaylists([]);

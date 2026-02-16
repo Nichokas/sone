@@ -3,6 +3,7 @@ import { useAtom, useAtomValue } from "jotai";
 import { invoke } from "@tauri-apps/api/core";
 import { favoriteTrackIdsAtom } from "../atoms/favorites";
 import { authTokensAtom } from "../atoms/auth";
+import { invalidateCache } from "../api/tidal";
 
 export function useFavorites() {
   const [favoriteTrackIds, setFavoriteTrackIds] = useAtom(favoriteTrackIdsAtom);
@@ -21,6 +22,7 @@ export function useFavorites() {
           userId: authTokens.user_id,
           trackId,
         });
+        invalidateCache("fav-tracks:");
       } catch (error: any) {
         // Revert on failure
         setFavoriteTrackIds((prev: Set<number>) => {
@@ -49,6 +51,7 @@ export function useFavorites() {
           userId: authTokens.user_id,
           trackId,
         });
+        invalidateCache("fav-tracks:");
       } catch (error: any) {
         // Revert on failure
         setFavoriteTrackIds((prev: Set<number>) => new Set([...prev, trackId]));
@@ -83,6 +86,7 @@ export function useFavorites() {
           userId: authTokens.user_id,
           albumId,
         });
+        invalidateCache("fav-albums:");
       } catch (error: any) {
         console.error("Failed to favorite album:", error);
         throw error;
@@ -99,6 +103,7 @@ export function useFavorites() {
           userId: authTokens.user_id,
           albumId,
         });
+        invalidateCache("fav-albums:");
       } catch (error: any) {
         console.error("Failed to remove favorite album:", error);
         throw error;
@@ -115,6 +120,7 @@ export function useFavorites() {
           userId: authTokens.user_id,
           playlistUuid,
         });
+        invalidateCache("fav-");
       } catch (error: any) {
         console.error("Failed to favorite playlist:", error);
         throw error;
@@ -131,6 +137,7 @@ export function useFavorites() {
           userId: authTokens.user_id,
           playlistUuid,
         });
+        invalidateCache("fav-");
       } catch (error: any) {
         console.error("Failed to remove favorite playlist:", error);
         throw error;

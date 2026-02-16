@@ -3,6 +3,7 @@ import { useAtom, useAtomValue } from "jotai";
 import { invoke } from "@tauri-apps/api/core";
 import { userPlaylistsAtom, favoritePlaylistsAtom } from "../atoms/playlists";
 import { authTokensAtom } from "../atoms/auth";
+import { invalidateCache } from "../api/tidal";
 import type { Playlist } from "../types";
 
 export function usePlaylists() {
@@ -36,6 +37,7 @@ export function usePlaylists() {
           playlistId,
           trackId: trackId,
         });
+        invalidateCache(`playlist:${playlistId}`);
       } catch (error: any) {
         console.error("Failed to add track to playlist:", error);
         throw error;
@@ -51,6 +53,7 @@ export function usePlaylists() {
           playlistId,
           index,
         });
+        invalidateCache(`playlist:${playlistId}`);
       } catch (error: any) {
         console.error("Failed to remove track from playlist:", error);
         throw error;
@@ -66,6 +69,7 @@ export function usePlaylists() {
           playlistId,
           trackIds,
         });
+        invalidateCache(`playlist:${playlistId}`);
       } catch (error: any) {
         console.error("Failed to add tracks to playlist:", error);
         throw error;

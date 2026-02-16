@@ -13,32 +13,70 @@ import type {
   Track,
 } from "../types";
 
+// ==================== In-memory cache ====================
+
+const store = new Map<string, { data: unknown; ts: number }>();
+
+const TTL = {
+  SHORT: 2 * 60_000,        // 2 min  — search, suggestions
+  MEDIUM: 5 * 60_000,       // 5 min  — playlists, favorites, mixes
+  LONG: 2 * 60 * 60_000,    // 2 hrs  — page sections
+  STATIC: 24 * 60 * 60_000, // 24 hrs — albums, artists, lyrics, credits, bios
+};
+
+function cached<T>(key: string, fetcher: () => Promise<T>, ttl: number): Promise<T> {
+  const entry = store.get(key);
+  if (entry && Date.now() - entry.ts < ttl) {
+    return Promise.resolve(entry.data as T);
+  }
+  return fetcher().then((data) => {
+    store.set(key, { data, ts: Date.now() });
+    return data;
+  });
+}
+
+/** Remove all cache entries whose key starts with the given prefix. */
+export function invalidateCache(prefix: string): void {
+  for (const key of store.keys()) {
+    if (key.startsWith(prefix)) store.delete(key);
+  }
+}
+
+/** Drop the entire cache (e.g. on logout). */
+export function clearCache(): void {
+  store.clear();
+}
+
 // ==================== Search ====================
 
 export async function searchTidal(
   query: string,
   limit: number = 20
 ): Promise<SearchResults> {
-  try {
-    return await invoke<SearchResults>("search_tidal", { query, limit });
-  } catch (error: any) {
-    console.error("Failed to search:", error);
-    throw error;
-  }
+  return cached(`search:${query}:${limit}`, async () => {
+    try {
+      return await invoke<SearchResults>("search_tidal", { query, limit });
+    } catch (error: any) {
+      console.error("Failed to search:", error);
+      throw error;
+    }
+  }, TTL.SHORT);
 }
 
 export async function getSuggestions(
   query: string,
   limit: number = 10
 ): Promise<SuggestionsResponse> {
-  try {
-    return await invoke<SuggestionsResponse>("get_suggestions", {
-      query,
-      limit,
-    });
-  } catch {
-    return { textSuggestions: [], directHits: [] };
-  }
+  return cached(`suggest:${query}:${limit}`, async () => {
+    try {
+      return await invoke<SuggestionsResponse>("get_suggestions", {
+        query,
+        limit,
+      });
+    } catch {
+      return { textSuggestions: [], directHits: [] };
+    }
+  }, TTL.SHORT);
 }
 
 // ==================== Home Page ====================
@@ -54,18 +92,22 @@ export async function refreshHomePage(): Promise<HomePageResponse> {
 export async function getPageSection(
   apiPath: string
 ): Promise<HomePageResponse> {
-  return await invoke<HomePageResponse>("get_page_section", { apiPath });
+  return cached(`section:${apiPath}`, () =>
+    invoke<HomePageResponse>("get_page_section", { apiPath }),
+  TTL.LONG);
 }
 
 // ==================== Album ====================
 
 export async function getAlbumDetail(albumId: number): Promise<AlbumDetail> {
-  try {
-    return await invoke<AlbumDetail>("get_album_detail", { albumId });
-  } catch (error: any) {
-    console.error("Failed to get album detail:", error);
-    throw error;
-  }
+  return cached(`album:${albumId}`, async () => {
+    try {
+      return await invoke<AlbumDetail>("get_album_detail", { albumId });
+    } catch (error: any) {
+      console.error("Failed to get album detail:", error);
+      throw error;
+    }
+  }, TTL.STATIC);
 }
 
 export async function getAlbumTracks(
@@ -73,16 +115,18 @@ export async function getAlbumTracks(
   offset: number = 0,
   limit: number = 50
 ): Promise<PaginatedTracks> {
-  try {
-    return await invoke<PaginatedTracks>("get_album_tracks", {
-      albumId,
-      offset,
-      limit,
-    });
-  } catch (error: any) {
-    console.error("Failed to get album tracks:", error);
-    throw error;
-  }
+  return cached(`album-tracks:${albumId}:${offset}:${limit}`, async () => {
+    try {
+      return await invoke<PaginatedTracks>("get_album_tracks", {
+        albumId,
+        offset,
+        limit,
+      });
+    } catch (error: any) {
+      console.error("Failed to get album tracks:", error);
+      throw error;
+    }
+  }, TTL.STATIC);
 }
 
 // ==================== Artist ====================
@@ -90,25 +134,33 @@ export async function getAlbumTracks(
 export async function getArtistDetail(
   artistId: number
 ): Promise<ArtistDetail> {
-  return await invoke<ArtistDetail>("get_artist_detail", { artistId });
+  return cached(`artist:${artistId}`, () =>
+    invoke<ArtistDetail>("get_artist_detail", { artistId }),
+  TTL.STATIC);
 }
 
 export async function getArtistTopTracks(
   artistId: number,
   limit: number = 20
 ): Promise<Track[]> {
-  return await invoke<Track[]>("get_artist_top_tracks", { artistId, limit });
+  return cached(`artist-tracks:${artistId}:${limit}`, () =>
+    invoke<Track[]>("get_artist_top_tracks", { artistId, limit }),
+  TTL.STATIC);
 }
 
 export async function getArtistAlbums(
   artistId: number,
   limit: number = 20
 ): Promise<AlbumDetail[]> {
-  return await invoke<AlbumDetail[]>("get_artist_albums", { artistId, limit });
+  return cached(`artist-albums:${artistId}:${limit}`, () =>
+    invoke<AlbumDetail[]>("get_artist_albums", { artistId, limit }),
+  TTL.STATIC);
 }
 
 export async function getArtistBio(artistId: number): Promise<string> {
-  return await invoke<string>("get_artist_bio", { artistId });
+  return cached(`artist-bio:${artistId}`, () =>
+    invoke<string>("get_artist_bio", { artistId }),
+  TTL.STATIC);
 }
 
 // ==================== Playlist / Mix ====================
@@ -116,22 +168,23 @@ export async function getArtistBio(artistId: number): Promise<string> {
 export async function getPlaylistTracks(
   playlistId: string
 ): Promise<Track[]> {
-  try {
-    console.log("Getting playlist tracks for:", playlistId);
-    const tracks = await invoke<Track[]>("get_playlist_tracks", {
-      playlistId: playlistId,
-    });
-    console.log("Got tracks:", tracks?.length);
-    return tracks || [];
-  } catch (error: any) {
-    console.error("Failed to get playlist tracks:", error);
-    alert(`Failed to get tracks: ${error?.message || error}`);
-    return [];
-  }
+  return cached(`playlist:${playlistId}`, async () => {
+    try {
+      const tracks = await invoke<Track[]>("get_playlist_tracks", {
+        playlistId: playlistId,
+      });
+      return tracks || [];
+    } catch (error: any) {
+      console.error("Failed to get playlist tracks:", error);
+      throw error;
+    }
+  }, TTL.MEDIUM);
 }
 
 export async function getMixItems(mixId: string): Promise<Track[]> {
-  return await invoke<Track[]>("get_mix_items", { mixId });
+  return cached(`mix:${mixId}`, () =>
+    invoke<Track[]>("get_mix_items", { mixId }),
+  TTL.MEDIUM);
 }
 
 /** Fetch all tracks from a media item (album / playlist / mix) */
@@ -155,21 +208,25 @@ export async function fetchMediaTracks(
 // ==================== Track metadata ====================
 
 export async function getTrackLyrics(trackId: number): Promise<Lyrics> {
-  try {
-    return await invoke<Lyrics>("get_track_lyrics", { trackId });
-  } catch (error: any) {
-    console.error("Failed to get lyrics:", error);
-    throw error;
-  }
+  return cached(`lyrics:${trackId}`, async () => {
+    try {
+      return await invoke<Lyrics>("get_track_lyrics", { trackId });
+    } catch (error: any) {
+      console.error("Failed to get lyrics:", error);
+      throw error;
+    }
+  }, TTL.STATIC);
 }
 
 export async function getTrackCredits(trackId: number): Promise<Credit[]> {
-  try {
-    return await invoke<Credit[]>("get_track_credits", { trackId });
-  } catch (error: any) {
-    console.error("Failed to get credits:", error);
-    throw error;
-  }
+  return cached(`credits:${trackId}`, async () => {
+    try {
+      return await invoke<Credit[]>("get_track_credits", { trackId });
+    } catch (error: any) {
+      console.error("Failed to get credits:", error);
+      throw error;
+    }
+  }, TTL.STATIC);
 }
 
 export async function getTrackRadio(
@@ -191,39 +248,39 @@ export async function getFavoriteTracks(
   offset: number = 0,
   limit: number = 50
 ): Promise<PaginatedTracks> {
-  try {
-    return await invoke<PaginatedTracks>("get_favorite_tracks", {
-      userId,
-      offset,
-      limit,
-    });
-  } catch (error: any) {
-    console.error("Failed to get favorite tracks:", error);
-    throw error;
-  }
+  return cached(`fav-tracks:${userId}:${offset}:${limit}`, async () => {
+    try {
+      return await invoke<PaginatedTracks>("get_favorite_tracks", {
+        userId,
+        offset,
+        limit,
+      });
+    } catch (error: any) {
+      console.error("Failed to get favorite tracks:", error);
+      throw error;
+    }
+  }, TTL.MEDIUM);
 }
 
 export async function getFavoriteArtists(
   userId: number,
   limit: number = 20
 ): Promise<ArtistDetail[]> {
-  return await invoke<ArtistDetail[]>("get_favorite_artists", {
-    userId,
-    limit,
-  });
+  return cached(`fav-artists:${userId}:${limit}`, () =>
+    invoke<ArtistDetail[]>("get_favorite_artists", { userId, limit }),
+  TTL.MEDIUM);
 }
 
 export async function getFavoriteAlbums(
   userId: number,
   limit: number = 50
 ): Promise<AlbumDetail[]> {
-  return await invoke<AlbumDetail[]>("get_favorite_albums", {
-    userId,
-    limit,
-  });
+  return cached(`fav-albums:${userId}:${limit}`, () =>
+    invoke<AlbumDetail[]>("get_favorite_albums", { userId, limit }),
+  TTL.MEDIUM);
 }
 
-// ==================== Auth helpers ====================
+// ==================== Auth helpers (never cached) ====================
 
 export async function getSavedCredentials(): Promise<{
   clientId: string;
