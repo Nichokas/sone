@@ -303,8 +303,15 @@ export default function AddToPlaylistMenu({
         );
         setTimeout(onClose, 500);
       } catch (err: any) {
-        const errStr = String(err);
-        if (errStr.includes("409") || errStr.toLowerCase().includes("dupe")) {
+        const isDuplicateError = (e: unknown): boolean => {
+          try {
+            const parsed = typeof e === "string" ? JSON.parse(e) : e;
+            if (parsed?.kind === "Api" && parsed?.message?.status === 409) return true;
+          } catch {}
+          return String(e).includes("409") || String(e).toLowerCase().includes("dupe");
+        };
+
+        if (isDuplicateError(err)) {
           setError(trackIds.length > 1 ? "Some tracks already in this playlist" : "Track already in this playlist");
         } else {
           setError(trackIds.length > 1 ? "Failed to add tracks" : "Failed to add track");

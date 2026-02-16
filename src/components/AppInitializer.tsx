@@ -5,12 +5,13 @@
  * once, regardless of how many components import the domain hooks.
  *
  * Uses usePlaybackActions() (zero-subscription) for all action callbacks,
- * and useAtomValue() only for atoms that must be read reactively.
+ * and store.get() for one-time reads (no reactive subscriptions).
  */
 
 import { useEffect, useRef, startTransition } from "react";
-import { useSetAtom, useAtomValue, useStore } from "jotai";
+import { useSetAtom, useStore } from "jotai";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 
 // Atoms — write-only setters (no re-render from reading)
 import {
@@ -27,6 +28,7 @@ import {
   queueAtom,
   historyAtom,
   volumeAtom,
+  preMuteVolumeAtom,
 } from "../atoms/playback";
 import { drawerOpenAtom } from "../atoms/ui";
 
@@ -59,11 +61,7 @@ export function AppInitializer() {
   const { addFavoriteTrack, removeFavoriteTrack, favoriteTrackIds } = useFavorites();
   const setDrawerOpen = useSetAtom(drawerOpenAtom);
 
-  // ---- Read only the atoms we NEED to react to ----
-  const isPlaying = useAtomValue(isPlayingAtom);
-  const currentTrack = useAtomValue(currentTrackAtom);
-
-  // ---- Store for one-time reads (volume, queue, history) — no subscription ----
+  // ---- Store for one-time reads (volume, queue, history, etc.) — no subscription ----
   const store = useStore();
 
   // ---- Navigation ----
@@ -116,10 +114,18 @@ export function AppInitializer() {
             .then((fp) => setFavoritePlaylists(fp || []))
             .catch(() => setFavoritePlaylists([]));
         } catch (playlistErr: any) {
-          const errStr = String(playlistErr);
           console.error("Failed to load playlists:", playlistErr);
 
-          if (errStr.includes("401") || errStr.includes("expired")) {
+          const isAuthError = (err: unknown): boolean => {
+            try {
+              const parsed = typeof err === "string" ? JSON.parse(err) : err;
+              if (parsed?.kind === "NotAuthenticated") return true;
+              if (parsed?.kind === "Api" && parsed?.message?.status === 401) return true;
+            } catch {}
+            return String(err).includes("401") || String(err).includes("expired");
+          };
+
+          if (isAuthError(playlistErr)) {
             try {
               console.log("Token expired, attempting refresh...");
               const refreshed = await invoke<AuthTokens>(
@@ -261,25 +267,15 @@ export function AppInitializer() {
 
   // ================================================================
   //  AUTO-PLAY next track when current finishes
-  //  Only depends on isPlaying + currentTrack (both read via useAtomValue).
-  //  playNext is stable (from usePlaybackActions).
+  //  Listens for the "track-finished" Tauri event emitted by the GStreamer
+  //  bus thread on EOS/Error — no polling needed.
   // ================================================================
   useEffect(() => {
-    if (!isPlaying || !currentTrack) return;
-
-    const id = setInterval(async () => {
-      try {
-        const finished = await invoke<boolean>("is_track_finished");
-        if (finished) {
-          playNext();
-        }
-      } catch (err) {
-        console.error("Failed to check track status:", err);
-      }
-    }, 1000);
-
-    return () => clearInterval(id);
-  }, [isPlaying, currentTrack, playNext]);
+    const unlisten = listen("track-finished", () => {
+      playNext();
+    });
+    return () => { unlisten.then((fn) => fn()); };
+  }, [playNext]);
 
   // ================================================================
   //  KEYBOARD SHORTCUTS
@@ -346,10 +342,10 @@ export function AppInitializer() {
           {
             const vol = store.get(volumeAtom);
             if (vol > 0) {
-              (window as any).__preMuteVolume = vol;
+              store.set(preMuteVolumeAtom, vol);
               setVolume(0);
             } else {
-              setVolume((window as any).__preMuteVolume ?? 0.5);
+              setVolume(store.get(preMuteVolumeAtom) || 0.5);
             }
           }
           break;

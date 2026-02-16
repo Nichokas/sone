@@ -1,3 +1,4 @@
+use crate::SoneError;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -450,12 +451,12 @@ impl TidalClient {
         self.client_secret = client_secret.to_string();
     }
 
-    pub async fn refresh_token(&mut self) -> Result<AuthTokens, String> {
+    pub async fn refresh_token(&mut self) -> Result<AuthTokens, SoneError> {
         if self.client_id.is_empty() {
-            return Err("Client ID not configured".to_string());
+            return Err(SoneError::NotConfigured("Client ID".into()));
         }
 
-        let current_tokens = self.tokens.as_ref().ok_or("Not authenticated")?;
+        let current_tokens = self.tokens.as_ref().ok_or(SoneError::NotAuthenticated)?;
         let refresh_tok = current_tokens.refresh_token.clone();
         let old_user_id = current_tokens.user_id;
 
@@ -475,14 +476,13 @@ impl TidalClient {
             .post(format!("{}/token", TIDAL_AUTH_URL))
             .form(&form_params)
             .send()
-            .await
-            .map_err(|e| format!("Failed to refresh token: {}", e))?;
+            .await?;
 
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
 
         if !status.is_success() {
-            return Err(format!("Token refresh failed ({}): {}", status, body));
+            return Err(SoneError::Api { status: status.as_u16(), body });
         }
 
         // Tidal's refresh response may not include refresh_token, so use a
@@ -499,7 +499,7 @@ impl TidalClient {
         }
 
         let parsed = serde_json::from_str::<RefreshResponse>(&body)
-            .map_err(|e| format!("Failed to parse refreshed tokens: {} - Body: {}", e, body))?;
+            .map_err(|e| SoneError::Parse(format!("{} - Body: {}", e, body)))?;
 
         let new_tokens = AuthTokens {
             access_token: parsed.access_token,
@@ -513,10 +513,43 @@ impl TidalClient {
         Ok(new_tokens)
     }
 
+    /// Perform an authenticated GET, check status, and deserialize the JSON body.
+    /// Use for endpoints where the response maps directly to `T` with no post-processing.
+    async fn api_get<T: serde::de::DeserializeOwned>(
+        &mut self,
+        path: &str,
+        query: &[(&str, &str)],
+    ) -> Result<T, SoneError> {
+        let body = self.api_get_body(path, query).await?;
+        serde_json::from_str(&body)
+            .map_err(|e| SoneError::Parse(format!("{} - Body: {}", e, &body[..body.len().min(500)])))
+    }
+
+    /// Perform an authenticated GET, check status, and return the raw body string.
+    /// Use for endpoints that need custom post-processing after status validation.
+    async fn api_get_body(
+        &mut self,
+        path: &str,
+        query: &[(&str, &str)],
+    ) -> Result<String, SoneError> {
+        let url = if path.starts_with("http") {
+            path.to_string()
+        } else {
+            format!("{}{}", TIDAL_API_URL, path)
+        };
+        let response = self.authenticated_get(&url, query).await?;
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        if !status.is_success() {
+            return Err(SoneError::Api { status: status.as_u16(), body });
+        }
+        Ok(body)
+    }
+
     /// Helper to perform an authenticated GET request with automatic token refresh on 401.
-    async fn authenticated_get(&mut self, url: &str, query: &[(&str, &str)]) -> Result<reqwest::Response, String> {
+    async fn authenticated_get(&mut self, url: &str, query: &[(&str, &str)]) -> Result<reqwest::Response, SoneError> {
         // 1. Get current token (clone to avoid borrow)
-        let access_token = self.tokens.as_ref().ok_or("Not authenticated")?.access_token.clone();
+        let access_token = self.tokens.as_ref().ok_or(SoneError::NotAuthenticated)?.access_token.clone();
 
         // 2. Make first request
         let response = self.client
@@ -524,32 +557,30 @@ impl TidalClient {
             .header("Authorization", format!("Bearer {}", access_token))
             .query(query)
             .send()
-            .await
-            .map_err(|e| format!("Request failed: {}", e))?;
+            .await?;
 
         // 3. Check 401
         if response.status() == reqwest::StatusCode::UNAUTHORIZED {
-             println!("DEBUG: Got 401 from {}, attempting refresh...", url);
+             log::debug!("Got 401 from {}, attempting refresh...", url);
              // 4. Refresh token (requires &mut self)
              let new_tokens = self.refresh_token().await?;
-             println!("DEBUG: Refresh successful, retrying request...");
+             log::debug!("Refresh successful, retrying request...");
 
              // 5. Retry request
-             return self.client
+             return Ok(self.client
                 .get(url)
                 .header("Authorization", format!("Bearer {}", new_tokens.access_token))
                 .query(query)
                 .send()
-                .await
-                .map_err(|e| format!("Retry failed: {}", e));
+                .await?);
         }
 
         Ok(response)
     }
 
-    pub async fn start_device_auth(&self) -> Result<DeviceAuthResponse, String> {
+    pub async fn start_device_auth(&self) -> Result<DeviceAuthResponse, SoneError> {
         if self.client_id.is_empty() {
-            return Err("Client ID not configured".to_string());
+            return Err(SoneError::NotConfigured("Client ID".into()));
         }
 
         let mut form_params = vec![
@@ -565,8 +596,7 @@ impl TidalClient {
             .post(format!("{}/device_authorization", TIDAL_AUTH_URL))
             .form(&form_params)
             .send()
-            .await
-            .map_err(|e| format!("Failed to start device auth: {}", e))?;
+            .await?;
 
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
@@ -574,23 +604,24 @@ impl TidalClient {
         if !status.is_success() {
             // Detect "not a Limited Input Device client" error and give a clear message
             if body.contains("not a Limited Input Device client") || body.contains("sub_status\":1002") {
-                return Err(
-                    "This Client ID does not support the Device Code flow. \
-                     It is likely a web player Client ID. \
-                     Please use \"Token Import\" instead, or use a native app (Android/desktop) Client ID."
+                return Err(SoneError::Api {
+                    status: status.as_u16(),
+                    body: "This Client ID does not support the Device Code flow. \
+                           It is likely a web player Client ID. \
+                           Please use \"Token Import\" instead, or use a native app (Android/desktop) Client ID."
                         .to_string(),
-                );
+                });
             }
-            return Err(format!("Device auth failed ({}): {}", status, body));
+            return Err(SoneError::Api { status: status.as_u16(), body });
         }
 
         serde_json::from_str::<DeviceAuthResponse>(&body)
-            .map_err(|e| format!("Failed to parse device auth response: {} - Body: {}", e, body))
+            .map_err(|e| SoneError::Parse(format!("{} - Body: {}", e, body)))
     }
 
-    pub async fn poll_device_token(&mut self, device_code: &str) -> Result<Option<AuthTokens>, String> {
+    pub async fn poll_device_token(&mut self, device_code: &str) -> Result<Option<AuthTokens>, SoneError> {
         if self.client_id.is_empty() {
-            return Err("Client ID not configured".to_string());
+            return Err(SoneError::NotConfigured("Client ID".into()));
         }
 
         let mut form_params = vec![
@@ -608,8 +639,7 @@ impl TidalClient {
             .post(format!("{}/token", TIDAL_AUTH_URL))
             .form(&form_params)
             .send()
-            .await
-            .map_err(|e| format!("Failed to poll device token: {}", e))?;
+            .await?;
 
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
@@ -622,11 +652,11 @@ impl TidalClient {
         }
 
         if !status.is_success() {
-            return Err(format!("Device token poll failed ({}): {}", status, body));
+            return Err(SoneError::Api { status: status.as_u16(), body });
         }
 
         let tokens = serde_json::from_str::<AuthTokens>(&body)
-            .map_err(|e| format!("Failed to parse device tokens: {} - Body: {}", e, body))?;
+            .map_err(|e| SoneError::Parse(format!("{} - Body: {}", e, body)))?;
 
         self.tokens = Some(tokens.clone());
         Ok(Some(tokens))
@@ -638,9 +668,9 @@ impl TidalClient {
         code_verifier: &str,
         redirect_uri: &str,
         client_unique_key: &str,
-    ) -> Result<AuthTokens, String> {
+    ) -> Result<AuthTokens, SoneError> {
         if self.client_id.is_empty() {
-            return Err("Client ID not configured".to_string());
+            return Err(SoneError::NotConfigured("Client ID".into()));
         }
 
         let response = self
@@ -656,83 +686,57 @@ impl TidalClient {
                 ("client_unique_key", client_unique_key),
             ])
             .send()
-            .await
-            .map_err(|e| format!("Failed to exchange PKCE code: {}", e))?;
+            .await?;
 
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
 
         if !status.is_success() {
-            return Err(format!("PKCE token exchange failed ({}): {}", status, body));
+            return Err(SoneError::Api { status: status.as_u16(), body });
         }
 
         let tokens = serde_json::from_str::<AuthTokens>(&body)
-            .map_err(|e| format!("Failed to parse PKCE tokens: {} - Body: {}", e, body))?;
+            .map_err(|e| SoneError::Parse(format!("{} - Body: {}", e, body)))?;
 
         self.tokens = Some(tokens.clone());
         Ok(tokens)
     }
 
-    pub async fn get_user_profile(&mut self, user_id: u64) -> Result<(String, Option<String>), String> {
-        let url = format!("{}/users/{}", TIDAL_API_URL, user_id);
-        let country_code = self.country_code.clone();
-
-        let response = self.authenticated_get(&url, &[
-            ("countryCode", &country_code),
-        ]).await?;
-
-        if !response.status().is_success() {
-            return Err(format!("User profile request failed: {}", response.status()));
-        }
+    pub async fn get_user_profile(&mut self, user_id: u64) -> Result<(String, Option<String>), SoneError> {
+        let cc = self.country_code.clone();
+        let body = self.api_get_body(&format!("/users/{}", user_id), &[("countryCode", &cc)]).await?;
 
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase")]
         struct UserProfile {
-            #[serde(default)]
-            first_name: Option<String>,
-            #[serde(default)]
-            last_name: Option<String>,
-            #[serde(default)]
-            username: Option<String>,
+            #[serde(default)] first_name: Option<String>,
+            #[serde(default)] last_name: Option<String>,
+            #[serde(default)] username: Option<String>,
         }
 
-        let data = response
-            .json::<UserProfile>()
-            .await
-            .map_err(|e| format!("Failed to parse user profile: {}", e))?;
-
+        let data: UserProfile = serde_json::from_str(&body)
+            .map_err(|e| SoneError::Parse(e.to_string()))?;
         let username = data.username.clone();
         let name = match (&data.first_name, &data.last_name) {
             (Some(f), Some(l)) if !f.is_empty() => format!("{} {}", f, l),
             (Some(f), _) if !f.is_empty() => f.clone(),
             _ => username.clone().unwrap_or_else(|| "Tidal User".to_string()),
         };
-
         Ok((name, username))
     }
 
-    pub async fn get_session_info(&mut self) -> Result<u64, String> {
-        let url = format!("{}/sessions", TIDAL_API_URL);
-        let country_code = self.country_code.clone();
-
-        let response = self.authenticated_get(&url, &[]).await?;
-
-        if !response.status().is_success() {
-            return Err(format!("Session request failed: {}", response.status()));
-        }
+    pub async fn get_session_info(&mut self) -> Result<u64, SoneError> {
+        let body = self.api_get_body("/sessions", &[]).await?;
 
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase")]
         struct SessionResponse {
             user_id: u64,
-            #[serde(default)]
-            country_code: Option<String>,
+            #[serde(default)] country_code: Option<String>,
         }
 
-        let data = response
-            .json::<SessionResponse>()
-            .await
-            .map_err(|e| format!("Failed to parse session: {}", e))?;
+        let data: SessionResponse = serde_json::from_str(&body)
+            .map_err(|e| SoneError::Parse(e.to_string()))?;
 
         // Store the user's country code for all subsequent API calls
         if let Some(cc) = data.country_code {
@@ -740,42 +744,26 @@ impl TidalClient {
                 self.country_code = cc;
             }
         }
-
         Ok(data.user_id)
     }
 
-    pub async fn get_user_playlists(&mut self, user_id: u64) -> Result<Vec<TidalPlaylist>, String> {
-        let url = format!("{}/users/{}/playlists", TIDAL_API_URL, user_id);
-        let country_code = self.country_code.clone();
-
-        let response = self.authenticated_get(&url, &[
-            ("countryCode", &country_code),
-            ("limit", "50"),
-        ]).await?;
-
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-
-        if !status.is_success() {
-            return Err(format!("API error ({}): {}", status, body));
-        }
+    pub async fn get_user_playlists(&mut self, user_id: u64) -> Result<Vec<TidalPlaylist>, SoneError> {
+        let cc = self.country_code.clone();
+        let body = self.api_get_body(
+            &format!("/users/{}/playlists", user_id),
+            &[("countryCode", &cc), ("limit", "50")],
+        ).await?;
 
         #[derive(Deserialize)]
-        struct PlaylistResponse {
-            items: Vec<TidalPlaylistRaw>,
-        }
+        struct PlaylistResponse { items: Vec<TidalPlaylistRaw> }
 
-        let data = serde_json::from_str::<PlaylistResponse>(&body)
-            .map_err(|e| format!("Failed to parse playlists: {} - Body: {}", e, body))?;
-        
-        // Convert raw playlists to our format
-        let playlists: Vec<TidalPlaylist> = data.items.into_iter().map(|p| p.into()).collect();
-
-        Ok(playlists)
+        let data: PlaylistResponse = serde_json::from_str(&body)
+            .map_err(|e| SoneError::Parse(format!("{} - Body: {}", e, body)))?;
+        Ok(data.items.into_iter().map(|p| p.into()).collect())
     }
 
-    pub async fn create_playlist(&self, user_id: u64, title: &str, description: &str) -> Result<TidalPlaylist, String> {
-        let tokens = self.tokens.as_ref().ok_or("Not authenticated")?;
+    pub async fn create_playlist(&self, user_id: u64, title: &str, description: &str) -> Result<TidalPlaylist, SoneError> {
+        let tokens = self.tokens.as_ref().ok_or(SoneError::NotAuthenticated)?;
 
         let response = self
             .client
@@ -784,24 +772,23 @@ impl TidalClient {
             .query(&[("countryCode", self.country_code.as_str())])
             .form(&[("title", title), ("description", description)])
             .send()
-            .await
-            .map_err(|e| format!("Failed to create playlist: {}", e))?;
+            .await?;
 
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
 
         if !status.is_success() {
-            return Err(format!("Create playlist API error ({}): {}", status, body));
+            return Err(SoneError::Api { status: status.as_u16(), body });
         }
 
         let raw = serde_json::from_str::<TidalPlaylistRaw>(&body)
-            .map_err(|e| format!("Failed to parse created playlist: {} - Body: {}", e, body))?;
+            .map_err(|e| SoneError::Parse(format!("{} - Body: {}", e, body)))?;
 
         Ok(raw.into())
     }
 
-    pub async fn add_track_to_playlist(&self, playlist_id: &str, track_id: u64) -> Result<(), String> {
-        let tokens = self.tokens.as_ref().ok_or("Not authenticated")?;
+    pub async fn add_track_to_playlist(&self, playlist_id: &str, track_id: u64) -> Result<(), SoneError> {
+        let tokens = self.tokens.as_ref().ok_or(SoneError::NotAuthenticated)?;
 
         // First, get the playlist ETag which is required for modifications
         let head_response = self
@@ -810,8 +797,7 @@ impl TidalClient {
             .header("Authorization", format!("Bearer {}", tokens.access_token))
             .query(&[("countryCode", self.country_code.as_str())])
             .send()
-            .await
-            .map_err(|e| format!("Failed to get playlist ETag: {}", e))?;
+            .await?;
 
         let etag = head_response
             .headers()
@@ -832,21 +818,20 @@ impl TidalClient {
                 ("onDupes", &"FAIL".to_string()),
             ])
             .send()
-            .await
-            .map_err(|e| format!("Failed to add track to playlist: {}", e))?;
+            .await?;
 
         let status = response.status();
 
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
-            return Err(format!("Add track to playlist API error ({}): {}", status, body));
+            return Err(SoneError::Api { status: status.as_u16(), body });
         }
 
         Ok(())
     }
 
-    pub async fn remove_track_from_playlist(&self, playlist_id: &str, index: u32) -> Result<(), String> {
-        let tokens = self.tokens.as_ref().ok_or("Not authenticated")?;
+    pub async fn remove_track_from_playlist(&self, playlist_id: &str, index: u32) -> Result<(), SoneError> {
+        let tokens = self.tokens.as_ref().ok_or(SoneError::NotAuthenticated)?;
 
         // First, get the playlist ETag which is required for modifications
         let head_response = self
@@ -855,8 +840,7 @@ impl TidalClient {
             .header("Authorization", format!("Bearer {}", tokens.access_token))
             .query(&[("countryCode", self.country_code.as_str())])
             .send()
-            .await
-            .map_err(|e| format!("Failed to get playlist ETag: {}", e))?;
+            .await?;
 
         let etag = head_response
             .headers()
@@ -873,65 +857,43 @@ impl TidalClient {
             .header("If-None-Match", &etag)
             .query(&[("countryCode", self.country_code.as_str())])
             .send()
-            .await
-            .map_err(|e| format!("Failed to remove track from playlist: {}", e))?;
+            .await?;
 
         let status = response.status();
 
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
-            return Err(format!("Remove track from playlist API error ({}): {}", status, body));
+            return Err(SoneError::Api { status: status.as_u16(), body });
         }
 
         Ok(())
     }
 
-    pub async fn get_favorite_playlists(&mut self, user_id: u64) -> Result<Vec<TidalPlaylist>, String> {
-        let url = format!("{}/users/{}/favorites/playlists", TIDAL_API_URL, user_id);
-        let country_code = self.country_code.clone();
+    pub async fn get_favorite_playlists(&mut self, user_id: u64) -> Result<Vec<TidalPlaylist>, SoneError> {
+        let cc = self.country_code.clone();
+        let body = self.api_get_body(
+            &format!("/users/{}/favorites/playlists", user_id),
+            &[("countryCode", &cc), ("limit", "50")],
+        ).await?;
 
-        let response = self.authenticated_get(&url, &[
-            ("countryCode", &country_code),
-            ("limit", "50"),
-        ]).await?;
-
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-
-        if !status.is_success() {
-            return Err(format!("Favorite playlists API error ({}): {}", status, body));
-        }
-
-        // The favorites endpoint wraps each playlist in { item: {...}, created: "..." }
         #[derive(Deserialize)]
-        struct FavEntry {
-            item: TidalPlaylistRaw,
-        }
+        struct FavEntry { item: TidalPlaylistRaw }
         #[derive(Deserialize)]
-        struct FavResponse {
-            items: Vec<FavEntry>,
-        }
+        struct FavResponse { items: Vec<FavEntry> }
 
-        let data = serde_json::from_str::<FavResponse>(&body)
-            .map_err(|e| format!("Failed to parse favorite playlists: {} - Body: {}", e, body))?;
-
-        let playlists: Vec<TidalPlaylist> = data.items.into_iter().map(|e| e.item.into()).collect();
-        Ok(playlists)
+        let data: FavResponse = serde_json::from_str(&body)
+            .map_err(|e| SoneError::Parse(format!("{} - Body: {}", e, body)))?;
+        Ok(data.items.into_iter().map(|e| e.item.into()).collect())
     }
 
-    pub async fn get_playlist_tracks(&mut self, playlist_id: &str) -> Result<Vec<TidalTrack>, String> {
-        let url = format!("{}/playlists/{}/tracks", TIDAL_API_URL, playlist_id);
-        let country_code = self.country_code.clone();
+    pub async fn get_playlist_tracks(&mut self, playlist_id: &str) -> Result<Vec<TidalTrack>, SoneError> {
+        let path = format!("/playlists/{}/tracks", playlist_id);
 
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase")]
         struct TracksResponse {
             items: Vec<TidalTrack>,
             total_number_of_items: u32,
-            #[serde(default)]
-            offset: u32,
-            #[serde(default)]
-            limit: u32,
         }
 
         let mut all_tracks: Vec<TidalTrack> = Vec::new();
@@ -939,24 +901,13 @@ impl TidalClient {
         let page_size: u32 = 100;
 
         loop {
+            let cc = self.country_code.clone();
             let offset_str = offset.to_string();
             let limit_str = page_size.to_string();
+            let body = self.api_get_body(&path, &[("countryCode", &cc), ("limit", &limit_str), ("offset", &offset_str)]).await?;
 
-            let response = self.authenticated_get(&url, &[
-                ("countryCode", &country_code),
-                ("limit", &limit_str),
-                ("offset", &offset_str),
-            ]).await?;
-
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-
-            if !status.is_success() {
-                return Err(format!("API error ({}): {}", status, body));
-            }
-
-            let mut data = serde_json::from_str::<TracksResponse>(&body)
-                .map_err(|e| format!("Failed to parse tracks: {} - Body: {}", e, body))?;
+            let mut data: TracksResponse = serde_json::from_str(&body)
+                .map_err(|e| SoneError::Parse(format!("{} - Body: {}", e, body)))?;
 
             let fetched = data.items.len() as u32;
             for t in &mut data.items { t.backfill_artist(); }
@@ -971,151 +922,81 @@ impl TidalClient {
         Ok(all_tracks)
     }
 
-    pub async fn get_playlist_tracks_page(&mut self, playlist_id: &str, offset: u32, limit: u32) -> Result<PaginatedTracks, String> {
-        let url = format!("{}/playlists/{}/tracks", TIDAL_API_URL, playlist_id);
+    pub async fn get_playlist_tracks_page(&mut self, playlist_id: &str, offset: u32, limit: u32) -> Result<PaginatedTracks, SoneError> {
+        let cc = self.country_code.clone();
         let limit_str = limit.to_string();
         let offset_str = offset.to_string();
-        let country_code = self.country_code.clone();
-
-        let response = self.authenticated_get(&url, &[
-            ("countryCode", &country_code),
-            ("limit", &limit_str),
-            ("offset", &offset_str),
-        ]).await?;
-
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-
-        if !status.is_success() {
-            return Err(format!("API error ({}): {}", status, body));
-        }
+        let body = self.api_get_body(
+            &format!("/playlists/{}/tracks", playlist_id),
+            &[("countryCode", &cc), ("limit", &limit_str), ("offset", &offset_str)],
+        ).await?;
 
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase")]
         struct TracksResponse {
             items: Vec<TidalTrack>,
             total_number_of_items: u32,
-            #[serde(default)]
-            offset: u32,
-            #[serde(default)]
-            limit: u32,
+            #[serde(default)] offset: u32,
+            #[serde(default)] limit: u32,
         }
 
-        let mut data = serde_json::from_str::<TracksResponse>(&body)
-            .map_err(|e| format!("Failed to parse playlist tracks: {} - Body: {}", e, body))?;
-
+        let mut data: TracksResponse = serde_json::from_str(&body)
+            .map_err(|e| SoneError::Parse(format!("{} - Body: {}", e, body)))?;
         for t in &mut data.items { t.backfill_artist(); }
-
-        Ok(PaginatedTracks {
-            items: data.items,
-            total_number_of_items: data.total_number_of_items,
-            offset: data.offset,
-            limit: data.limit,
-        })
+        Ok(PaginatedTracks { items: data.items, total_number_of_items: data.total_number_of_items, offset: data.offset, limit: data.limit })
     }
 
-    pub async fn get_album_detail(&mut self, album_id: u64) -> Result<TidalAlbumDetail, String> {
-        let url = format!("{}/albums/{}", TIDAL_API_URL, album_id);
-        let country_code = self.country_code.clone();
-
-        let response = self.authenticated_get(&url, &[
-            ("countryCode", &country_code),
-        ]).await?;
-
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-
-        if !status.is_success() {
-            return Err(format!("API error ({}): {}", status, body));
-        }
-
-        serde_json::from_str::<TidalAlbumDetail>(&body)
-            .map_err(|e| format!("Failed to parse album: {} - Body: {}", e, body))
+    pub async fn get_album_detail(&mut self, album_id: u64) -> Result<TidalAlbumDetail, SoneError> {
+        let cc = self.country_code.clone();
+        self.api_get(&format!("/albums/{}", album_id), &[("countryCode", &cc)]).await
     }
 
-    pub async fn get_album_tracks(&mut self, album_id: u64, offset: u32, limit: u32) -> Result<PaginatedTracks, String> {
-        let url = format!("{}/albums/{}/tracks", TIDAL_API_URL, album_id);
+    pub async fn get_album_tracks(&mut self, album_id: u64, offset: u32, limit: u32) -> Result<PaginatedTracks, SoneError> {
+        let cc = self.country_code.clone();
         let limit_str = limit.to_string();
         let offset_str = offset.to_string();
-        let country_code = self.country_code.clone();
-
-        let response = self.authenticated_get(&url, &[
-            ("countryCode", &country_code),
-            ("limit", &limit_str),
-            ("offset", &offset_str),
-        ]).await?;
-
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-
-        if !status.is_success() {
-            return Err(format!("API error ({}): {}", status, body));
-        }
+        let body = self.api_get_body(
+            &format!("/albums/{}/tracks", album_id),
+            &[("countryCode", &cc), ("limit", &limit_str), ("offset", &offset_str)],
+        ).await?;
 
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase")]
         struct AlbumTracksResponse {
             items: Vec<TidalTrack>,
             total_number_of_items: u32,
-            #[serde(default)]
-            offset: u32,
-            #[serde(default)]
-            limit: u32,
+            #[serde(default)] offset: u32,
+            #[serde(default)] limit: u32,
         }
 
-        let mut data = serde_json::from_str::<AlbumTracksResponse>(&body)
-            .map_err(|e| format!("Failed to parse album tracks: {} - Body: {}", e, body))?;
-
+        let mut data: AlbumTracksResponse = serde_json::from_str(&body)
+            .map_err(|e| SoneError::Parse(format!("{} - Body: {}", e, body)))?;
         for t in &mut data.items { t.backfill_artist(); }
-        Ok(PaginatedTracks {
-            items: data.items,
-            total_number_of_items: data.total_number_of_items,
-            offset: data.offset,
-            limit: data.limit,
-        })
+        Ok(PaginatedTracks { items: data.items, total_number_of_items: data.total_number_of_items, offset: data.offset, limit: data.limit })
     }
 
-    pub async fn get_favorite_tracks(&mut self, user_id: u64, offset: u32, limit: u32) -> Result<PaginatedTracks, String> {
-        let url = format!("{}/users/{}/favorites/tracks", TIDAL_API_URL, user_id);
+    pub async fn get_favorite_tracks(&mut self, user_id: u64, offset: u32, limit: u32) -> Result<PaginatedTracks, SoneError> {
+        let cc = self.country_code.clone();
         let limit_str = limit.to_string();
         let offset_str = offset.to_string();
-        let country_code = self.country_code.clone();
-
-        let response = self.authenticated_get(&url, &[
-            ("countryCode", &country_code),
-            ("limit", &limit_str),
-            ("offset", &offset_str),
-            ("order", "DATE"),
-            ("orderDirection", "DESC"),
-        ]).await?;
-
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-
-        if !status.is_success() {
-            return Err(format!("API error ({}): {}", status, body));
-        }
+        let body = self.api_get_body(
+            &format!("/users/{}/favorites/tracks", user_id),
+            &[("countryCode", &cc), ("limit", &limit_str), ("offset", &offset_str), ("order", "DATE"), ("orderDirection", "DESC")],
+        ).await?;
 
         #[derive(Deserialize)]
-        struct FavoriteTrackItem {
-            item: TidalTrack,
-            created: String,
-        }
-
+        struct FavoriteTrackItem { item: TidalTrack, created: String }
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase")]
         struct FavoriteTracksResponse {
             items: Vec<FavoriteTrackItem>,
             total_number_of_items: u32,
-            #[serde(default)]
-            offset: u32,
-            #[serde(default)]
-            limit: u32,
+            #[serde(default)] offset: u32,
+            #[serde(default)] limit: u32,
         }
 
-        let data = serde_json::from_str::<FavoriteTracksResponse>(&body)
-            .map_err(|e| format!("Failed to parse favorite tracks: {} - Body: {}", e, body))?;
-
+        let data: FavoriteTracksResponse = serde_json::from_str(&body)
+            .map_err(|e| SoneError::Parse(format!("{} - Body: {}", e, body)))?;
         Ok(PaginatedTracks {
             items: data.items.into_iter().map(|f| {
                 let mut t = f.item;
@@ -1129,8 +1010,8 @@ impl TidalClient {
         })
     }
 
-    pub async fn is_track_favorited(&self, user_id: u64, track_id: u64) -> Result<bool, String> {
-        let tokens = self.tokens.as_ref().ok_or("Not authenticated")?;
+    pub async fn is_track_favorited(&self, user_id: u64, track_id: u64) -> Result<bool, SoneError> {
+        let tokens = self.tokens.as_ref().ok_or(SoneError::NotAuthenticated)?;
         let response = self
             .client
             .get(format!("{}/users/{}/favorites/tracks", TIDAL_API_URL, user_id))
@@ -1143,14 +1024,13 @@ impl TidalClient {
                 ("orderDirection", "DESC"),
             ])
             .send()
-            .await
-            .map_err(|e| format!("Failed to fetch favorite tracks: {}", e))?;
+            .await?;
 
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
 
         if !status.is_success() {
-            return Err(format!("API error ({}): {}", status, body));
+            return Err(SoneError::Api { status: status.as_u16(), body });
         }
 
         #[derive(Deserialize)]
@@ -1169,7 +1049,7 @@ impl TidalClient {
         }
 
         let data = serde_json::from_str::<FavoriteTracksResponse>(&body)
-            .map_err(|e| format!("Failed to parse favorite tracks: {} - Body: {}", e, body))?;
+            .map_err(|e| SoneError::Parse(format!("{} - Body: {}", e, body)))?;
 
         Ok(data.items.iter().any(|entry| {
             entry.id == Some(track_id)
@@ -1180,8 +1060,8 @@ impl TidalClient {
         }))
     }
 
-    pub async fn get_favorite_track_ids(&self, user_id: u64) -> Result<Vec<u64>, String> {
-        let tokens = self.tokens.as_ref().ok_or("Not authenticated")?;
+    pub async fn get_favorite_track_ids(&self, user_id: u64) -> Result<Vec<u64>, SoneError> {
+        let tokens = self.tokens.as_ref().ok_or(SoneError::NotAuthenticated)?;
         let response = self
             .client
             .get(format!("{}/users/{}/favorites/tracks", TIDAL_API_URL, user_id))
@@ -1194,14 +1074,13 @@ impl TidalClient {
                 ("orderDirection", "DESC"),
             ])
             .send()
-            .await
-            .map_err(|e| format!("Failed to fetch favorite tracks: {}", e))?;
+            .await?;
 
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
 
         if !status.is_success() {
-            return Err(format!("API error ({}): {}", status, body));
+            return Err(SoneError::Api { status: status.as_u16(), body });
         }
 
         #[derive(Deserialize)]
@@ -1216,13 +1095,13 @@ impl TidalClient {
         }
 
         let data = serde_json::from_str::<FavResponse>(&body)
-            .map_err(|e| format!("Failed to parse favorite track ids: {}", e))?;
+            .map_err(|e| SoneError::Parse(e.to_string()))?;
 
         Ok(data.items.into_iter().map(|f| f.item.id).collect())
     }
 
-    pub async fn add_favorite_track(&self, user_id: u64, track_id: u64) -> Result<(), String> {
-        let tokens = self.tokens.as_ref().ok_or("Not authenticated")?;
+    pub async fn add_favorite_track(&self, user_id: u64, track_id: u64) -> Result<(), SoneError> {
+        let tokens = self.tokens.as_ref().ok_or(SoneError::NotAuthenticated)?;
         let track_id_str = track_id.to_string();
 
         let response = self
@@ -1232,21 +1111,20 @@ impl TidalClient {
             .query(&[("countryCode", self.country_code.as_str())])
             .form(&[("trackId", track_id_str.as_str())])
             .send()
-            .await
-            .map_err(|e| format!("Failed to favorite track: {}", e))?;
+            .await?;
 
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
 
         if !status.is_success() {
-            return Err(format!("API error ({}): {}", status, body));
+            return Err(SoneError::Api { status: status.as_u16(), body });
         }
 
         Ok(())
     }
 
-    pub async fn remove_favorite_track(&self, user_id: u64, track_id: u64) -> Result<(), String> {
-        let tokens = self.tokens.as_ref().ok_or("Not authenticated")?;
+    pub async fn remove_favorite_track(&self, user_id: u64, track_id: u64) -> Result<(), SoneError> {
+        let tokens = self.tokens.as_ref().ok_or(SoneError::NotAuthenticated)?;
 
         let response = self
             .client
@@ -1257,21 +1135,20 @@ impl TidalClient {
             .header("Authorization", format!("Bearer {}", tokens.access_token))
             .query(&[("countryCode", self.country_code.as_str())])
             .send()
-            .await
-            .map_err(|e| format!("Failed to remove favorite track: {}", e))?;
+            .await?;
 
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
 
         if !status.is_success() {
-            return Err(format!("API error ({}): {}", status, body));
+            return Err(SoneError::Api { status: status.as_u16(), body });
         }
 
         Ok(())
     }
 
-    pub async fn is_album_favorited(&self, user_id: u64, album_id: u64) -> Result<bool, String> {
-        let tokens = self.tokens.as_ref().ok_or("Not authenticated")?;
+    pub async fn is_album_favorited(&self, user_id: u64, album_id: u64) -> Result<bool, SoneError> {
+        let tokens = self.tokens.as_ref().ok_or(SoneError::NotAuthenticated)?;
         let response = self
             .client
             .get(format!("{}/users/{}/favorites/albums", TIDAL_API_URL, user_id))
@@ -1284,14 +1161,13 @@ impl TidalClient {
                 ("orderDirection", "DESC"),
             ])
             .send()
-            .await
-            .map_err(|e| format!("Failed to fetch favorite albums: {}", e))?;
+            .await?;
 
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
 
         if !status.is_success() {
-            return Err(format!("API error ({}): {}", status, body));
+            return Err(SoneError::Api { status: status.as_u16(), body });
         }
 
         #[derive(Deserialize)]
@@ -1310,7 +1186,7 @@ impl TidalClient {
         }
 
         let data = serde_json::from_str::<FavoriteAlbumsResponse>(&body)
-            .map_err(|e| format!("Failed to parse favorite albums: {} - Body: {}", e, body))?;
+            .map_err(|e| SoneError::Parse(format!("{} - Body: {}", e, body)))?;
 
         Ok(data.items.iter().any(|entry| {
             entry.id == Some(album_id)
@@ -1321,8 +1197,8 @@ impl TidalClient {
         }))
     }
 
-    pub async fn add_favorite_album(&self, user_id: u64, album_id: u64) -> Result<(), String> {
-        let tokens = self.tokens.as_ref().ok_or("Not authenticated")?;
+    pub async fn add_favorite_album(&self, user_id: u64, album_id: u64) -> Result<(), SoneError> {
+        let tokens = self.tokens.as_ref().ok_or(SoneError::NotAuthenticated)?;
         let album_id_str = album_id.to_string();
 
         let response = self
@@ -1332,21 +1208,20 @@ impl TidalClient {
             .query(&[("countryCode", self.country_code.as_str())])
             .form(&[("albumId", album_id_str.as_str())])
             .send()
-            .await
-            .map_err(|e| format!("Failed to favorite album: {}", e))?;
+            .await?;
 
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
 
         if !status.is_success() {
-            return Err(format!("API error ({}): {}", status, body));
+            return Err(SoneError::Api { status: status.as_u16(), body });
         }
 
         Ok(())
     }
 
-    pub async fn remove_favorite_album(&self, user_id: u64, album_id: u64) -> Result<(), String> {
-        let tokens = self.tokens.as_ref().ok_or("Not authenticated")?;
+    pub async fn remove_favorite_album(&self, user_id: u64, album_id: u64) -> Result<(), SoneError> {
+        let tokens = self.tokens.as_ref().ok_or(SoneError::NotAuthenticated)?;
 
         let response = self
             .client
@@ -1357,21 +1232,20 @@ impl TidalClient {
             .header("Authorization", format!("Bearer {}", tokens.access_token))
             .query(&[("countryCode", self.country_code.as_str())])
             .send()
-            .await
-            .map_err(|e| format!("Failed to remove favorite album: {}", e))?;
+            .await?;
 
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
 
         if !status.is_success() {
-            return Err(format!("API error ({}): {}", status, body));
+            return Err(SoneError::Api { status: status.as_u16(), body });
         }
 
         Ok(())
     }
 
-    pub async fn add_favorite_playlist(&self, user_id: u64, playlist_uuid: &str) -> Result<(), String> {
-        let tokens = self.tokens.as_ref().ok_or("Not authenticated")?;
+    pub async fn add_favorite_playlist(&self, user_id: u64, playlist_uuid: &str) -> Result<(), SoneError> {
+        let tokens = self.tokens.as_ref().ok_or(SoneError::NotAuthenticated)?;
 
         let response = self
             .client
@@ -1380,21 +1254,20 @@ impl TidalClient {
             .query(&[("countryCode", self.country_code.as_str())])
             .form(&[("uuid", playlist_uuid)])
             .send()
-            .await
-            .map_err(|e| format!("Failed to favorite playlist: {}", e))?;
+            .await?;
 
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
 
         if !status.is_success() {
-            return Err(format!("API error ({}): {}", status, body));
+            return Err(SoneError::Api { status: status.as_u16(), body });
         }
 
         Ok(())
     }
 
-    pub async fn remove_favorite_playlist(&self, user_id: u64, playlist_uuid: &str) -> Result<(), String> {
-        let tokens = self.tokens.as_ref().ok_or("Not authenticated")?;
+    pub async fn remove_favorite_playlist(&self, user_id: u64, playlist_uuid: &str) -> Result<(), SoneError> {
+        let tokens = self.tokens.as_ref().ok_or(SoneError::NotAuthenticated)?;
 
         let response = self
             .client
@@ -1405,21 +1278,20 @@ impl TidalClient {
             .header("Authorization", format!("Bearer {}", tokens.access_token))
             .query(&[("countryCode", self.country_code.as_str())])
             .send()
-            .await
-            .map_err(|e| format!("Failed to remove favorite playlist: {}", e))?;
+            .await?;
 
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
 
         if !status.is_success() {
-            return Err(format!("API error ({}): {}", status, body));
+            return Err(SoneError::Api { status: status.as_u16(), body });
         }
 
         Ok(())
     }
 
-    pub async fn add_tracks_to_playlist(&self, playlist_id: &str, track_ids: &[u64]) -> Result<(), String> {
-        let tokens = self.tokens.as_ref().ok_or("Not authenticated")?;
+    pub async fn add_tracks_to_playlist(&self, playlist_id: &str, track_ids: &[u64]) -> Result<(), SoneError> {
+        let tokens = self.tokens.as_ref().ok_or(SoneError::NotAuthenticated)?;
 
         // Get the playlist ETag which is required for modifications
         let head_response = self
@@ -1428,8 +1300,7 @@ impl TidalClient {
             .header("Authorization", format!("Bearer {}", tokens.access_token))
             .query(&[("countryCode", self.country_code.as_str())])
             .send()
-            .await
-            .map_err(|e| format!("Failed to get playlist ETag: {}", e))?;
+            .await?;
 
         let etag = head_response
             .headers()
@@ -1451,36 +1322,24 @@ impl TidalClient {
                 ("onDupes", "SKIP"),
             ])
             .send()
-            .await
-            .map_err(|e| format!("Failed to add tracks to playlist: {}", e))?;
+            .await?;
 
         let status = response.status();
 
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
-            return Err(format!("Add tracks to playlist API error ({}): {}", status, body));
+            return Err(SoneError::Api { status: status.as_u16(), body });
         }
 
         Ok(())
     }
 
-    pub async fn get_stream_url(&mut self, track_id: u64, quality: &str) -> Result<StreamInfo, String> {
-        let url = format!("{}/tracks/{}/playbackinfopostpaywall", TIDAL_API_URL, track_id);
-        let country_code = self.country_code.clone();
-
-        let response = self.authenticated_get(&url, &[
-            ("countryCode", &country_code),
-            ("audioquality", quality),
-            ("playbackmode", "STREAM"),
-            ("assetpresentation", "FULL"),
-        ]).await?;
-
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-
-        if !status.is_success() {
-            return Err(format!("API error ({}): {}", status, body));
-        }
+    pub async fn get_stream_url(&mut self, track_id: u64, quality: &str) -> Result<StreamInfo, SoneError> {
+        let cc = self.country_code.clone();
+        let body = self.api_get_body(
+            &format!("/tracks/{}/playbackinfopostpaywall", track_id),
+            &[("countryCode", &cc), ("audioquality", quality), ("playbackmode", "STREAM"), ("assetpresentation", "FULL")],
+        ).await?;
 
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase")]
@@ -1496,13 +1355,13 @@ impl TidalClient {
         }
 
         let data = serde_json::from_str::<PlaybackInfo>(&body)
-            .map_err(|e| format!("Failed to parse playback info: {} - Body: {}", e, body))?;
+            .map_err(|e| SoneError::Parse(format!("{} - Body: {}", e, body)))?;
 
         use base64::Engine;
         let manifest_bytes = base64::engine::general_purpose::STANDARD.decode(&data.manifest)
-            .map_err(|e| format!("Failed to decode manifest: {}", e))?;
+            .map_err(|e| SoneError::Parse(format!("Failed to decode manifest: {}", e)))?;
         let manifest_str = String::from_utf8(manifest_bytes)
-            .map_err(|e| format!("Invalid manifest encoding: {}", e))?;
+            .map_err(|e| SoneError::Parse(format!("Invalid manifest encoding: {}", e)))?;
 
         let mut codec: Option<String> = None;
 
@@ -1519,7 +1378,7 @@ impl TidalClient {
             }
 
             let manifest_data = serde_json::from_str::<BtsManifest>(&manifest_str)
-                .map_err(|e| format!("Failed to parse BTS manifest: {} - Manifest: {}", e, manifest_str))?;
+                .map_err(|e| SoneError::Parse(format!("{} - Manifest: {}", e, manifest_str)))?;
 
             codec = manifest_data.codecs.map(|c| c.to_uppercase().split('.').next().unwrap_or("").to_string());
 
@@ -1527,7 +1386,7 @@ impl TidalClient {
                 .urls
                 .into_iter()
                 .next()
-                .ok_or("No URL in BTS manifest".to_string())?
+                .ok_or(SoneError::Parse("No URL in BTS manifest".into()))?
         }
         // Handle DASH/MPD format — return raw manifest for GStreamer
         else if data.manifest_mime_type.contains("dash+xml") {
@@ -1561,13 +1420,13 @@ impl TidalClient {
                     if let Some(u) = urls.into_iter().next() {
                         u
                     } else {
-                        return Err("Empty URL list in manifest".to_string());
+                        return Err(SoneError::Parse("Empty URL list in manifest".into()));
                     }
                 } else {
-                    return Err("No urls in JSON manifest".to_string());
+                    return Err(SoneError::Parse("No urls in JSON manifest".into()));
                 }
             } else {
-                return Err(format!("Unknown manifest format '{}': {}", data.manifest_mime_type, &manifest_str[..manifest_str.len().min(300)]));
+                return Err(SoneError::Parse(format!("Unknown manifest format '{}': {}", data.manifest_mime_type, &manifest_str[..manifest_str.len().min(300)])));
             }
         };
 
@@ -1581,78 +1440,37 @@ impl TidalClient {
         })
     }
 
-    pub async fn get_track_lyrics(&mut self, track_id: u64) -> Result<TidalLyrics, String> {
-        let url = format!("{}/tracks/{}/lyrics", TIDAL_API_URL, track_id);
-        let country_code = self.country_code.clone();
-
-        let response = self.authenticated_get(&url, &[
-            ("countryCode", &country_code),
-        ]).await?;
-
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-
-        if !status.is_success() {
-            return Err(format!("Lyrics not available ({})", status));
-        }
-
-        serde_json::from_str::<TidalLyrics>(&body)
-            .map_err(|e| format!("Failed to parse lyrics: {} - Body: {}", e, body))
+    pub async fn get_track_lyrics(&mut self, track_id: u64) -> Result<TidalLyrics, SoneError> {
+        let cc = self.country_code.clone();
+        self.api_get(&format!("/tracks/{}/lyrics", track_id), &[("countryCode", &cc)]).await
     }
 
-    pub async fn get_track_credits(&mut self, track_id: u64) -> Result<Vec<TidalCredit>, String> {
-        let url = format!("{}/tracks/{}/credits", TIDAL_API_URL, track_id);
-        let country_code = self.country_code.clone();
-
-        let response = self.authenticated_get(&url, &[
-            ("countryCode", &country_code),
-        ]).await?;
-
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-
-        if !status.is_success() {
-            return Err(format!("Credits not available ({})", status));
-        }
-
-        serde_json::from_str::<Vec<TidalCredit>>(&body)
-            .map_err(|e| format!("Failed to parse credits: {} - Body: {}", e, body))
+    pub async fn get_track_credits(&mut self, track_id: u64) -> Result<Vec<TidalCredit>, SoneError> {
+        let cc = self.country_code.clone();
+        self.api_get(&format!("/tracks/{}/credits", track_id), &[("countryCode", &cc)]).await
     }
 
-    pub async fn get_track_radio(&mut self, track_id: u64, limit: u32) -> Result<Vec<TidalTrack>, String> {
-        let url = format!("{}/tracks/{}/radio", TIDAL_API_URL, track_id);
+    pub async fn get_track_radio(&mut self, track_id: u64, limit: u32) -> Result<Vec<TidalTrack>, SoneError> {
+        let cc = self.country_code.clone();
         let limit_str = limit.to_string();
-        let country_code = self.country_code.clone();
-
-        let response = self.authenticated_get(&url, &[
-            ("countryCode", &country_code),
-            ("limit", &limit_str),
-        ]).await?;
-
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-
-        if !status.is_success() {
-            return Err(format!("Track radio not available ({})", status));
-        }
+        let body = self.api_get_body(
+            &format!("/tracks/{}/radio", track_id),
+            &[("countryCode", &cc), ("limit", &limit_str)],
+        ).await?;
 
         // Tidal v1 radio endpoint may return { items: [...] } or a flat array
         #[derive(Deserialize)]
-        struct RadioResponse {
-            items: Vec<TidalTrack>,
-        }
+        struct RadioResponse { items: Vec<TidalTrack> }
 
         if let Ok(mut data) = serde_json::from_str::<RadioResponse>(&body) {
             for t in &mut data.items { t.backfill_artist(); }
             return Ok(data.items);
         }
-
-        // Fallback: try parsing as a flat array
         serde_json::from_str::<Vec<TidalTrack>>(&body)
-            .map_err(|e| format!("Failed to parse track radio: {} - Body: {}", e, body))
+            .map_err(|e| SoneError::Parse(format!("{} - Body: {}", e, body)))
     }
 
-    pub async fn search(&mut self, query: &str, limit: u32) -> Result<TidalSearchResults, String> {
+    pub async fn search(&mut self, query: &str, limit: u32) -> Result<TidalSearchResults, SoneError> {
         // Try the v2 API first (web app uses this, returns playlists properly)
         if let Ok(v2) = self.search_v2(query, limit).await {
             return Ok(v2);
@@ -1662,61 +1480,33 @@ impl TidalClient {
         self.search_v1(query, limit).await
     }
 
-    async fn search_v2(&mut self, query: &str, limit: u32) -> Result<TidalSearchResults, String> {
+    async fn search_v2(&mut self, query: &str, limit: u32) -> Result<TidalSearchResults, SoneError> {
+        let cc = self.country_code.clone();
         let limit_str = limit.to_string();
-        let url = format!("{}/search", TIDAL_API_V2_URL);
-        let country_code = self.country_code.clone();
-
-        let resp = self.authenticated_get(&url, &[
-            ("query", query),
-            ("countryCode", &country_code),
-            ("limit", &limit_str),
-            ("types", "ARTISTS,ALBUMS,TRACKS,PLAYLISTS"),
-            ("includeContributors", "true"),
-            ("includeUserPlaylists", "true"),
-            ("includeDidYouMean", "true"),
-            ("supportsUserData", "true"),
-            ("locale", "en_US"),
-            ("deviceType", "BROWSER"),
-        ]).await?;
-
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-
-        if !status.is_success() {
-            return Err(format!("v2 search HTTP {}", status));
-        }
-
+        // v2 uses a different base URL, so pass the full URL
+        let body = self.api_get_body(
+            &format!("{}/search", TIDAL_API_V2_URL),
+            &[("query", query), ("countryCode", &cc), ("limit", &limit_str),
+              ("types", "ARTISTS,ALBUMS,TRACKS,PLAYLISTS"), ("includeContributors", "true"),
+              ("includeUserPlaylists", "true"), ("includeDidYouMean", "true"),
+              ("supportsUserData", "true"), ("locale", "en_US"), ("deviceType", "BROWSER")],
+        ).await?;
         self.parse_search_response(&body, query, "v2")
     }
 
-    async fn search_v1(&mut self, query: &str, limit: u32) -> Result<TidalSearchResults, String> {
+    async fn search_v1(&mut self, query: &str, limit: u32) -> Result<TidalSearchResults, SoneError> {
+        let cc = self.country_code.clone();
         let limit_str = limit.to_string();
-        let url = format!("{}/search", TIDAL_API_URL);
-        let country_code = self.country_code.clone();
-
-        let resp = self.authenticated_get(&url, &[
-            ("query", query),
-            ("countryCode", &country_code),
-            ("limit", &limit_str),
-            ("offset", "0"),
-            ("types", "ARTISTS,ALBUMS,TRACKS,PLAYLISTS"),
-            ("includeContributors", "true"),
-            ("includeUserPlaylists", "true"),
-            ("supportsUserData", "true"),
-        ]).await?;
-
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-
-        if !status.is_success() {
-            return Err(format!("Search failed ({}): {}", status, body));
-        }
-
+        let body = self.api_get_body(
+            "/search",
+            &[("query", query), ("countryCode", &cc), ("limit", &limit_str), ("offset", "0"),
+              ("types", "ARTISTS,ALBUMS,TRACKS,PLAYLISTS"), ("includeContributors", "true"),
+              ("includeUserPlaylists", "true"), ("supportsUserData", "true")],
+        ).await?;
         self.parse_search_response(&body, query, "v1")
     }
 
-    fn parse_search_response(&self, body: &str, query: &str, tag: &str) -> Result<TidalSearchResults, String> {
+    fn parse_search_response(&self, body: &str, query: &str, tag: &str) -> Result<TidalSearchResults, SoneError> {
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase")]
         struct Sec<T> { items: Vec<T> }
@@ -1731,7 +1521,7 @@ impl TidalClient {
         }
 
         let data: SR = serde_json::from_str(body)
-            .map_err(|e| format!("Failed to parse search ({}): {}", tag, e))?;
+            .map_err(|e| SoneError::Parse(format!("search ({}): {}", tag, e)))?;
 
         // Parse topHits from the raw JSON (v2 returns an array of typed entities)
         let top_hits = serde_json::from_str::<serde_json::Value>(body)
@@ -1739,7 +1529,7 @@ impl TidalClient {
             .and_then(|json| json.get("topHits").and_then(|v| v.as_array()).map(|arr| DirectHitItem::parse_array(arr)))
             .unwrap_or_default();
 
-        eprintln!("DEBUG search [{}]: t={} al={} ar={} pl={} th={} for '{}'", tag,
+        log::debug!("search [{}]: t={} al={} ar={} pl={} th={} for '{}'", tag,
             data.tracks.as_ref().map(|s| s.items.len()).unwrap_or(0),
             data.albums.as_ref().map(|s| s.items.len()).unwrap_or(0),
             data.artists.as_ref().map(|s| s.items.len()).unwrap_or(0),
@@ -1784,13 +1574,13 @@ impl TidalClient {
             Ok(r) if r.status().is_success() => {
                 let body = r.text().await.unwrap_or_default();
                 if let Some(result) = Self::parse_v2_suggestions_full(&body, limit) {
-                    eprintln!("DEBUG suggestions v2: {} text, {} hits for '{}'",
+                    log::debug!("suggestions v2: {} text, {} hits for '{}'",
                         result.text_suggestions.len(), result.direct_hits.len(), query);
                     return result;
                 }
             }
-            Ok(r) => eprintln!("DEBUG suggestions v2: HTTP {} for '{}'", r.status(), query),
-            Err(e) => eprintln!("DEBUG suggestions v2: error: {} for '{}'", e, query),
+            Ok(r) => log::debug!("suggestions v2: HTTP {} for '{}'", r.status(), query),
+            Err(e) => log::debug!("suggestions v2: error: {} for '{}'", e, query),
         }
 
         empty
@@ -1862,17 +1652,17 @@ impl TidalClient {
                         result.sections
                     }
                     Err(e) => {
-                        eprintln!("DEBUG v2 home feed: parse error: {}", e);
+                        log::debug!("v2 home feed: parse error: {}", e);
                         vec![]
                     }
                 }
             }
             Ok(r) => {
-                eprintln!("DEBUG v2 home feed: HTTP {}", r.status());
+                log::debug!("v2 home feed: HTTP {}", r.status());
                 vec![]
             }
             Err(e) => {
-                eprintln!("DEBUG v2 home feed: request error: {}", e);
+                log::debug!("v2 home feed: request error: {}", e);
                 vec![]
             }
         }
@@ -1912,7 +1702,7 @@ impl TidalClient {
                         // Try parsing as page response first.
                         if let Ok(result) = Self::parse_page_response(&json) {
                             if !result.sections.is_empty() {
-                                eprintln!("DEBUG v2 feed activities: got {} sections", result.sections.len());
+                                log::debug!("v2 feed activities: got {} sections", result.sections.len());
                                 return result.sections;
                             }
                         }
@@ -1920,7 +1710,7 @@ impl TidalClient {
                         // Fallback: extract items array directly as a "Recently played" section
                         if let Some(items) = json.get("items").and_then(|v| v.as_array()) {
                             if !items.is_empty() {
-                                eprintln!("DEBUG v2 feed activities: got {} raw items", items.len());
+                                log::debug!("v2 feed activities: got {} raw items", items.len());
                                 return vec![HomePageSection {
                                     title: "Recently played".to_string(),
                                     section_type: "MIXED_LIST".to_string(),
@@ -1931,59 +1721,49 @@ impl TidalClient {
                             }
                         }
 
-                        eprintln!("DEBUG v2 feed activities: no usable data");
+                        log::debug!("v2 feed activities: no usable data");
                         vec![]
                     }
                     Err(e) => {
-                        eprintln!("DEBUG v2 feed activities: parse error: {}", e);
+                        log::debug!("v2 feed activities: parse error: {}", e);
                         vec![]
                     }
                 }
             }
             Ok(r) => {
-                eprintln!("DEBUG v2 feed activities: HTTP {}", r.status());
+                log::debug!("v2 feed activities: HTTP {}", r.status());
                 vec![]
             }
             Err(e) => {
-                eprintln!("DEBUG v2 feed activities: request error: {}", e);
+                log::debug!("v2 feed activities: request error: {}", e);
                 vec![]
             }
         }
     }
 
     /// Fetch a single page endpoint. Handles both V1 and V2 response formats.
-    async fn fetch_page_endpoint(&mut self, endpoint: &str) -> Result<Vec<HomePageSection>, String> {
-        let url = format!("{}/{}", TIDAL_API_URL, endpoint);
-        let country_code = self.country_code.clone();
-
-        let response = self.authenticated_get(&url, &[
-            ("countryCode", &country_code),
-            ("deviceType", "BROWSER"),
-            ("locale", "en_US"),
-        ]).await?;
-
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-
-        if !status.is_success() {
-            eprintln!("Page endpoint {} failed ({}): {}", endpoint, status, &body[..body.len().min(200)]);
-            return Ok(vec![]); // Don't fail the whole home page for one endpoint
-        }
+    async fn fetch_page_endpoint(&mut self, endpoint: &str) -> Result<Vec<HomePageSection>, SoneError> {
+        let cc = self.country_code.clone();
+        let body = match self.api_get_body(&format!("/{}", endpoint), &[("countryCode", &cc), ("deviceType", "BROWSER"), ("locale", "en_US")]).await {
+            Ok(b) => b,
+            Err(e) => {
+                log::warn!("Page endpoint {} failed: {}", endpoint, e);
+                return Ok(vec![]); // Don't fail the whole home page for one endpoint
+            }
+        };
 
         let json: Value = serde_json::from_str(&body)
-            .map_err(|e| format!("Failed to parse {} JSON: {}", endpoint, e))?;
+            .map_err(|e| SoneError::Parse(format!("{} JSON: {}", endpoint, e)))?;
 
         let result = Self::parse_page_response(&json)?;
-        eprintln!("DEBUG [{}]: parsed {} sections: {:?}", endpoint,
+        log::debug!("[{}]: parsed {} sections: {:?}", endpoint,
             result.sections.len(),
             result.sections.iter().map(|s| format!("\"{}\" ({})", s.title, s.section_type)).collect::<Vec<_>>()
         );
 
-        // If we got 0 sections, log the top-level keys for debugging
         if result.sections.is_empty() {
             if let Some(obj) = json.as_object() {
-                let keys: Vec<&String> = obj.keys().collect();
-                eprintln!("DEBUG [{}]: 0 sections parsed, top-level keys: {:?}", endpoint, keys);
+                log::debug!("[{}]: 0 sections parsed, top-level keys: {:?}", endpoint, obj.keys().collect::<Vec<_>>());
             }
         }
 
@@ -2034,14 +1814,14 @@ impl TidalClient {
     /// Fetch the full home page by calling multiple Tidal page endpoints.
     /// Tries the v2 home/feed/static endpoint first (what the web app uses),
     /// then falls back to the multi-endpoint v1 approach.
-    pub async fn get_home_page(&mut self) -> Result<HomePageResponse, String> {
+    pub async fn get_home_page(&mut self) -> Result<HomePageResponse, SoneError> {
         let mut all_sections = Vec::new();
         let mut seen_titles = std::collections::HashSet::new();
 
         // Try v2 home feed first (single endpoint, what the web app uses)
         let v2_sections = self.fetch_v2_home_feed().await;
         if !v2_sections.is_empty() {
-            eprintln!("DEBUG [v2 home/feed/static]: got {} sections", v2_sections.len());
+            log::debug!("[v2 home/feed/static]: got {} sections", v2_sections.len());
             Self::add_unique_sections(&mut all_sections, &mut seen_titles, v2_sections);
         }
 
@@ -2120,7 +1900,7 @@ impl TidalClient {
                     });
                 }
                 Ok(_) => {}
-                Err(e) => eprintln!("DEBUG: Failed to get listening history: {}", e),
+                Err(e) => log::debug!("Failed to get listening history: {}", e),
             }
 
             // "Albums you might like" from user's favorite albums
@@ -2135,7 +1915,7 @@ impl TidalClient {
                     });
                 }
                 Ok(_) => {}
-                Err(e) => eprintln!("DEBUG: Failed to get favorite albums: {}", e),
+                Err(e) => log::debug!("Failed to get favorite albums: {}", e),
             }
 
             // "Playlists you'll love" from user's playlists
@@ -2150,7 +1930,7 @@ impl TidalClient {
                     });
                 }
                 Ok(_) => {}
-                Err(e) => eprintln!("DEBUG: Failed to get user playlists for section: {}", e),
+                Err(e) => log::debug!("Failed to get user playlists for section: {}", e),
             }
         }
 
@@ -2177,12 +1957,12 @@ impl TidalClient {
 
         all_sections.sort_by_key(|s| priority_order(&s.title));
 
-        eprintln!("DEBUG [home_page]: total {} unique sections", all_sections.len());
+        log::debug!("[home_page]: total {} unique sections", all_sections.len());
         Ok(HomePageResponse { sections: all_sections })
     }
 
     /// Parse a pages API response, supporting V1, V2, and tab/category formats.
-    fn parse_page_response(json: &Value) -> Result<HomePageResponse, String> {
+    fn parse_page_response(json: &Value) -> Result<HomePageResponse, SoneError> {
         let mut sections = Vec::new();
 
         // ---- V1 format: { rows: [ { modules: [ { type, title, pagedList, ... } ] } ] }
@@ -2518,45 +2298,27 @@ impl TidalClient {
         })
     }
 
-    pub async fn get_favorite_artists(&mut self, user_id: u64, limit: u32) -> Result<Vec<TidalArtistDetail>, String> {
-        let url = format!("{}/users/{}/favorites/artists", TIDAL_API_URL, user_id);
+    pub async fn get_favorite_artists(&mut self, user_id: u64, limit: u32) -> Result<Vec<TidalArtistDetail>, SoneError> {
+        let cc = self.country_code.clone();
         let limit_str = limit.to_string();
-        let country_code = self.country_code.clone();
-
-        let response = self.authenticated_get(&url, &[
-            ("countryCode", &country_code),
-            ("limit", &limit_str),
-            ("offset", "0"),
-            ("order", "DATE"),
-            ("orderDirection", "DESC"),
-        ]).await?;
-
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-
-        if !status.is_success() {
-            return Err(format!("API error ({}): {}", status, body));
-        }
+        let body = self.api_get_body(
+            &format!("/users/{}/favorites/artists", user_id),
+            &[("countryCode", &cc), ("limit", &limit_str), ("offset", "0"), ("order", "DATE"), ("orderDirection", "DESC")],
+        ).await?;
 
         #[derive(Deserialize)]
-        struct FavoriteArtistItem {
-            item: TidalArtistDetail,
-        }
-
+        struct FavEntry { item: TidalArtistDetail }
         #[derive(Deserialize)]
-        struct FavoriteArtistsResponse {
-            items: Vec<FavoriteArtistItem>,
-        }
+        struct FavResponse { items: Vec<FavEntry> }
 
-        let data = serde_json::from_str::<FavoriteArtistsResponse>(&body)
-            .map_err(|e| format!("Failed to parse favorite artists: {} - Body: {}", e, &body[..body.len().min(500)]))?;
-
+        let data: FavResponse = serde_json::from_str(&body)
+            .map_err(|e| SoneError::Parse(format!("{} - Body: {}", e, &body[..body.len().min(500)])))?;
         Ok(data.items.into_iter().map(|f| f.item).collect())
     }
 
     /// Fetch user's favorite albums as raw JSON for home page sections.
-    async fn get_favorite_albums_raw(&self, user_id: u64, limit: u32) -> Result<Value, String> {
-        let tokens = self.tokens.as_ref().ok_or("Not authenticated")?;
+    async fn get_favorite_albums_raw(&self, user_id: u64, limit: u32) -> Result<Value, SoneError> {
+        let tokens = self.tokens.as_ref().ok_or(SoneError::NotAuthenticated)?;
 
         let response = self
             .client
@@ -2570,25 +2332,24 @@ impl TidalClient {
                 ("orderDirection", "DESC"),
             ])
             .send()
-            .await
-            .map_err(|e| format!("Failed to fetch favorite albums: {}", e))?;
+            .await?;
 
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
 
         if !status.is_success() {
-            return Err(format!("Favorite albums API error ({}): {}", status, body));
+            return Err(SoneError::Api { status: status.as_u16(), body });
         }
 
         let json: Value = serde_json::from_str(&body)
-            .map_err(|e| format!("Failed to parse favorite albums: {}", e))?;
+            .map_err(|e| SoneError::Parse(e.to_string()))?;
 
         // Response format: { items: [ { item: { id, title, cover, artist, ... }, created: "..." } ] }
         if let Some(items) = json.get("items").and_then(|i| i.as_array()) {
             let albums: Vec<Value> = items.iter()
                 .filter_map(|entry| entry.get("item").cloned())
                 .collect();
-            eprintln!("DEBUG [favorite_albums]: got {} albums", albums.len());
+            log::debug!("[favorite_albums]: got {} albums", albums.len());
             Ok(Value::Array(albums))
         } else {
             Ok(Value::Array(vec![]))
@@ -2596,46 +2357,29 @@ impl TidalClient {
     }
 
     /// Fetch user's favorite albums as structured data for the sidebar.
-    pub async fn get_favorite_albums(&mut self, user_id: u64, limit: u32) -> Result<Vec<TidalAlbumDetail>, String> {
-        let url = format!("{}/users/{}/favorites/albums", TIDAL_API_URL, user_id);
-        let country_code = self.country_code.clone();
+    pub async fn get_favorite_albums(&mut self, user_id: u64, limit: u32) -> Result<Vec<TidalAlbumDetail>, SoneError> {
+        let cc = self.country_code.clone();
+        let limit_str = limit.to_string();
+        let body = self.api_get_body(
+            &format!("/users/{}/favorites/albums", user_id),
+            &[("countryCode", &cc), ("limit", &limit_str), ("offset", "0"), ("order", "DATE"), ("orderDirection", "DESC")],
+        ).await?;
 
-        let response = self.authenticated_get(&url, &[
-            ("countryCode", &country_code),
-            ("limit", &limit.to_string()),
-            ("offset", "0"),
-            ("order", "DATE"),
-            ("orderDirection", "DESC"),
-        ]).await?;
-
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-
-        if !status.is_success() {
-            return Err(format!("Favorite albums API error ({}): {}", status, body));
-        }
-
-        // The favorites endpoint wraps each album in { item: { ... }, created: "..." }
         #[derive(Deserialize)]
-        struct FavEntry {
-            item: TidalAlbumDetail,
-        }
+        struct FavEntry { item: TidalAlbumDetail }
         #[derive(Deserialize)]
-        struct FavResponse {
-            items: Vec<FavEntry>,
-        }
+        struct FavResponse { items: Vec<FavEntry> }
 
-        let data = serde_json::from_str::<FavResponse>(&body)
-            .map_err(|e| format!("Failed to parse favorite albums: {} - Body: {}", e, body))?;
-
+        let data: FavResponse = serde_json::from_str(&body)
+            .map_err(|e| SoneError::Parse(format!("{} - Body: {}", e, body)))?;
         let albums: Vec<TidalAlbumDetail> = data.items.into_iter().map(|e| e.item).collect();
-        eprintln!("DEBUG [get_favorite_albums]: got {} albums", albums.len());
+        log::debug!("[get_favorite_albums]: got {} albums", albums.len());
         Ok(albums)
     }
 
     /// Fetch user's playlists as raw JSON for home page sections.
-    async fn get_user_playlists_raw(&self, user_id: u64, limit: u32) -> Result<Value, String> {
-        let tokens = self.tokens.as_ref().ok_or("Not authenticated")?;
+    async fn get_user_playlists_raw(&self, user_id: u64, limit: u32) -> Result<Value, SoneError> {
+        let tokens = self.tokens.as_ref().ok_or(SoneError::NotAuthenticated)?;
 
         let response = self
             .client
@@ -2649,22 +2393,21 @@ impl TidalClient {
                 ("orderDirection", "DESC"),
             ])
             .send()
-            .await
-            .map_err(|e| format!("Failed to fetch user playlists: {}", e))?;
+            .await?;
 
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
 
         if !status.is_success() {
-            return Err(format!("User playlists API error ({}): {}", status, body));
+            return Err(SoneError::Api { status: status.as_u16(), body });
         }
 
         let json: Value = serde_json::from_str(&body)
-            .map_err(|e| format!("Failed to parse user playlists: {}", e))?;
+            .map_err(|e| SoneError::Parse(e.to_string()))?;
 
         // Response format: { items: [ { uuid, title, image, ... } ] }
         if let Some(items) = json.get("items").and_then(|i| i.as_array()) {
-            eprintln!("DEBUG [user_playlists]: got {} playlists", items.len());
+            log::debug!("[user_playlists]: got {} playlists", items.len());
             Ok(Value::Array(items.clone()))
         } else {
             Ok(Value::Array(vec![]))
@@ -2672,8 +2415,8 @@ impl TidalClient {
     }
 
     /// Fetch user's recently played tracks for the "listening history" section.
-    async fn get_listening_history(&self, user_id: u64) -> Result<Value, String> {
-        let tokens = self.tokens.as_ref().ok_or("Not authenticated")?;
+    async fn get_listening_history(&self, user_id: u64) -> Result<Value, SoneError> {
+        let tokens = self.tokens.as_ref().ok_or(SoneError::NotAuthenticated)?;
 
         // Try the user's listening history via favorites/tracks (recent order)
         let response = self
@@ -2688,25 +2431,24 @@ impl TidalClient {
                 ("orderDirection", "DESC"),
             ])
             .send()
-            .await
-            .map_err(|e| format!("Failed to fetch listening history: {}", e))?;
+            .await?;
 
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
 
         if !status.is_success() {
-            return Err(format!("Listening history API error ({}): {}", status, body));
+            return Err(SoneError::Api { status: status.as_u16(), body });
         }
 
         let json: Value = serde_json::from_str(&body)
-            .map_err(|e| format!("Failed to parse listening history: {}", e))?;
+            .map_err(|e| SoneError::Parse(e.to_string()))?;
 
         // Response format: { items: [ { item: { id, title, artist, album, ... }, created: "..." } ] }
         if let Some(items) = json.get("items").and_then(|i| i.as_array()) {
             let tracks: Vec<Value> = items.iter()
                 .filter_map(|entry| entry.get("item").cloned())
                 .collect();
-            eprintln!("DEBUG [listening_history]: got {} tracks", tracks.len());
+            log::debug!("[listening_history]: got {} tracks", tracks.len());
             Ok(Value::Array(tracks))
         } else {
             Ok(Value::Array(vec![]))
@@ -2716,56 +2458,28 @@ impl TidalClient {
     // ==================== Artist Detail ====================
 
     /// Fetch full artist detail (name, picture, etc.)
-    pub async fn get_artist_detail(&mut self, artist_id: u64) -> Result<TidalArtistDetail, String> {
-        let url = format!("{}/artists/{}", TIDAL_API_URL, artist_id);
-        let country_code = self.country_code.clone();
-
-        let response = self.authenticated_get(&url, &[
-            ("countryCode", &country_code),
-        ]).await?;
-
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-
-        if !status.is_success() {
-            return Err(format!("Artist detail API error ({}): {}", status, body));
-        }
-
-        serde_json::from_str::<TidalArtistDetail>(&body)
-            .map_err(|e| format!("Failed to parse artist detail: {} - Body: {}", e, &body[..body.len().min(500)]))
+    pub async fn get_artist_detail(&mut self, artist_id: u64) -> Result<TidalArtistDetail, SoneError> {
+        let cc = self.country_code.clone();
+        self.api_get(&format!("/artists/{}", artist_id), &[("countryCode", &cc)]).await
     }
 
     // ==================== Mix / Radio Items ====================
 
     /// Fetch the tracks in a mix (custom mixes, radio stations, etc.)
     /// Tidal mixes use a string mixId like "00e4f8f7a5bd..."
-    pub async fn get_mix_items(&mut self, mix_id: &str) -> Result<Vec<TidalTrack>, String> {
-        let url = format!("{}/mixes/{}/items", TIDAL_API_URL, mix_id);
-        let country_code = self.country_code.clone();
+    pub async fn get_mix_items(&mut self, mix_id: &str) -> Result<Vec<TidalTrack>, SoneError> {
+        let cc = self.country_code.clone();
+        let body = self.api_get_body(
+            &format!("/mixes/{}/items", mix_id),
+            &[("countryCode", &cc)],
+        ).await?;
 
-        let response = self.authenticated_get(&url, &[
-            ("countryCode", &country_code),
-        ]).await?;
-
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-
-        if !status.is_success() {
-            return Err(format!("Mix items API error ({}): {}", status, body));
-        }
-
-        // Response: { items: [ { item: { id, title, ... }, type: "track" } ] }
         let json: Value = serde_json::from_str(&body)
-            .map_err(|e| format!("Failed to parse mix items: {}", e))?;
-
+            .map_err(|e| SoneError::Parse(e.to_string()))?;
         if let Some(items) = json.get("items").and_then(|i| i.as_array()) {
-            let tracks: Vec<TidalTrack> = items.iter()
-                .filter_map(|entry| {
-                    entry.get("item")
-                        .and_then(|item| serde_json::from_value::<TidalTrack>(item.clone()).ok())
-                })
-                .collect();
-            Ok(tracks)
+            Ok(items.iter()
+                .filter_map(|entry| entry.get("item").and_then(|item| serde_json::from_value::<TidalTrack>(item.clone()).ok()))
+                .collect())
         } else {
             Ok(vec![])
         }
@@ -2774,111 +2488,64 @@ impl TidalClient {
     // ==================== Artist Page ====================
 
     /// Fetch an artist's top tracks
-    pub async fn get_artist_top_tracks(&mut self, artist_id: u64, limit: u32) -> Result<Vec<TidalTrack>, String> {
-        let url = format!("{}/artists/{}/toptracks", TIDAL_API_URL, artist_id);
+    pub async fn get_artist_top_tracks(&mut self, artist_id: u64, limit: u32) -> Result<Vec<TidalTrack>, SoneError> {
+        let cc = self.country_code.clone();
         let limit_str = limit.to_string();
-        let country_code = self.country_code.clone();
-
-        let response = self.authenticated_get(&url, &[
-            ("countryCode", &country_code),
-            ("limit", &limit_str),
-            ("offset", "0"),
-        ]).await?;
-
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-
-        if !status.is_success() {
-            return Err(format!("Artist top tracks API error ({}): {}", status, body));
-        }
+        let body = self.api_get_body(
+            &format!("/artists/{}/toptracks", artist_id),
+            &[("countryCode", &cc), ("limit", &limit_str), ("offset", "0")],
+        ).await?;
 
         #[derive(Deserialize)]
-        #[serde(rename_all = "camelCase")]
-        struct ArtistTracksResponse {
-            items: Vec<TidalTrack>,
-        }
+        struct Resp { items: Vec<TidalTrack> }
 
-        let mut data = serde_json::from_str::<ArtistTracksResponse>(&body)
-            .map_err(|e| format!("Failed to parse artist top tracks: {} - Body: {}", e, &body[..body.len().min(500)]))?;
-
+        let mut data: Resp = serde_json::from_str(&body)
+            .map_err(|e| SoneError::Parse(format!("{} - Body: {}", e, &body[..body.len().min(500)])))?;
         for t in &mut data.items { t.backfill_artist(); }
         Ok(data.items)
     }
 
     /// Fetch an artist's albums
-    pub async fn get_artist_albums(&mut self, artist_id: u64, limit: u32) -> Result<Vec<TidalAlbumDetail>, String> {
-        let url = format!("{}/artists/{}/albums", TIDAL_API_URL, artist_id);
+    pub async fn get_artist_albums(&mut self, artist_id: u64, limit: u32) -> Result<Vec<TidalAlbumDetail>, SoneError> {
+        let cc = self.country_code.clone();
         let limit_str = limit.to_string();
-        let country_code = self.country_code.clone();
-
-        let response = self.authenticated_get(&url, &[
-            ("countryCode", &country_code),
-            ("limit", &limit_str),
-            ("offset", "0"),
-        ]).await?;
-
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-
-        if !status.is_success() {
-            return Err(format!("Artist albums API error ({}): {}", status, body));
-        }
+        let body = self.api_get_body(
+            &format!("/artists/{}/albums", artist_id),
+            &[("countryCode", &cc), ("limit", &limit_str), ("offset", "0")],
+        ).await?;
 
         #[derive(Deserialize)]
-        #[serde(rename_all = "camelCase")]
-        struct ArtistAlbumsResponse {
-            items: Vec<TidalAlbumDetail>,
-        }
+        struct Resp { items: Vec<TidalAlbumDetail> }
 
-        let data = serde_json::from_str::<ArtistAlbumsResponse>(&body)
-            .map_err(|e| format!("Failed to parse artist albums: {} - Body: {}", e, &body[..body.len().min(500)]))?;
-
+        let data: Resp = serde_json::from_str(&body)
+            .map_err(|e| SoneError::Parse(format!("{} - Body: {}", e, &body[..body.len().min(500)])))?;
         Ok(data.items)
     }
 
     /// Fetch artist bio text
-    pub async fn get_artist_bio(&mut self, artist_id: u64) -> Result<String, String> {
-        let url = format!("{}/artists/{}/bio", TIDAL_API_URL, artist_id);
-        let country_code = self.country_code.clone();
-
-        let response = self.authenticated_get(&url, &[
-            ("countryCode", &country_code),
-        ]).await?;
-
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-
-        if !status.is_success() {
-            return Ok(String::new()); // Bio not always available
+    pub async fn get_artist_bio(&mut self, artist_id: u64) -> Result<String, SoneError> {
+        let cc = self.country_code.clone();
+        match self.api_get_body(&format!("/artists/{}/bio", artist_id), &[("countryCode", &cc)]).await {
+            Ok(body) => {
+                let json: Value = serde_json::from_str(&body).unwrap_or_default();
+                Ok(json.get("text").and_then(|t| t.as_str()).unwrap_or("").to_string())
+            }
+            Err(_) => Ok(String::new()), // Bio not always available
         }
-
-        let json: Value = serde_json::from_str(&body).unwrap_or_default();
-        Ok(json.get("text").and_then(|t| t.as_str()).unwrap_or("").to_string())
     }
 
-    pub async fn get_page(&mut self, api_path: &str) -> Result<HomePageResponse, String> {
-        let url = if api_path.starts_with("http") {
+    pub async fn get_page(&mut self, api_path: &str) -> Result<HomePageResponse, SoneError> {
+        let cc = self.country_code.clone();
+        // api_get_body handles both full URLs and relative paths
+        let path = if api_path.starts_with("http") {
             api_path.to_string()
         } else {
-            format!("{}/{}", TIDAL_API_URL, api_path)
+            format!("/{}", api_path)
         };
-        let country_code = self.country_code.clone();
-
-        let response = self.authenticated_get(&url, &[
-            ("countryCode", &country_code),
-            ("deviceType", "BROWSER"),
-        ]).await?;
-
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-
-        if !status.is_success() {
-            return Err(format!("Page API error ({}): {}", status, body));
-        }
+        let body = self.api_get_body(&path, &[("countryCode", &cc), ("deviceType", "BROWSER")]).await?;
 
         let json: Value = serde_json::from_str(&body)
-            .map_err(|e| format!("Failed to parse page JSON: {}", e))?;
-
+            .map_err(|e| SoneError::Parse(e.to_string()))?;
         Self::parse_page_response(&json)
     }
 }
