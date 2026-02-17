@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { ListMusic, Play } from "lucide-react";
 
 // In-memory blob URL cache — size-based LRU (50 MB) with revokeObjectURL on eviction.
-const MAX_BLOB_BYTES = 50 * 1024 * 1024; // 50 MB
+const MAX_BLOB_BYTES = 200 * 1024 * 1024; // 200 MB
 let blobTotalBytes = 0;
 let blobAccessCounter = 0;
 
