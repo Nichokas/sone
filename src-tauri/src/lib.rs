@@ -11,8 +11,11 @@ use cache::DiskCache;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::Mutex;
 use tauri::Manager;
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tidal_api::{AuthTokens, TidalClient};
 
@@ -26,6 +29,8 @@ pub struct Settings {
     pub client_id: String,
     #[serde(default)]
     pub client_secret: String,
+    #[serde(default)]
+    pub minimize_to_tray: bool,
 }
 
 pub struct AppState {
@@ -34,6 +39,7 @@ pub struct AppState {
     pub settings_path: PathBuf,
     pub cache_dir: PathBuf,
     pub disk_cache: DiskCache,
+    pub minimize_to_tray: AtomicBool,
 }
 
 pub fn now_secs() -> u64 {
@@ -56,12 +62,20 @@ impl AppState {
 
         let disk_cache = DiskCache::new(cache_dir.join("v2"));
 
+        // Load minimize_to_tray preference from saved settings
+        let minimize_to_tray = fs::read_to_string(&settings_path)
+            .ok()
+            .and_then(|c| serde_json::from_str::<Settings>(&c).ok())
+            .map(|s| s.minimize_to_tray)
+            .unwrap_or(false);
+
         Self {
             audio_player: AudioPlayer::new(app_handle),
             tidal_client: Mutex::new(TidalClient::new()),
             settings_path,
             cache_dir,
             disk_cache,
+            minimize_to_tray: AtomicBool::new(minimize_to_tray),
         }
     }
 
@@ -130,7 +144,74 @@ pub fn run() {
                     }).ok();
                 }
             }
+
+            // System tray icon
+            let show_item = MenuItemBuilder::with_id("show", "Show").build(app)?;
+            let quit_item = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
+            let menu = MenuBuilder::new(app)
+                .item(&show_item)
+                .separator()
+                .item(&quit_item)
+                .build()?;
+
+            let icon_bytes = include_bytes!("../icons/icon.png");
+            let tray_icon = if let Ok(image) = image::load_from_memory(icon_bytes) {
+                let rgba = image.to_rgba8();
+                let (width, height) = rgba.dimensions();
+                let icon = tauri::image::Image::new(rgba.as_raw(), width, height);
+                TrayIconBuilder::new()
+                    .icon(icon)
+                    .menu(&menu)
+                    .tooltip("Sone")
+                    .on_tray_icon_event(|tray, event| {
+                        if let TrayIconEvent::Click {
+                            button: MouseButton::Left,
+                            button_state: MouseButtonState::Up,
+                            ..
+                        } = event
+                        {
+                            let app = tray.app_handle();
+                            if let Some(window) = app.get_webview_window("main") {
+                                let _ = window.show();
+                                let _ = window.unminimize();
+                                let _ = window.set_focus();
+                            }
+                        }
+                    })
+                    .on_menu_event(|app, event| match event.id().as_ref() {
+                        "show" => {
+                            if let Some(window) = app.get_webview_window("main") {
+                                let _ = window.show();
+                                let _ = window.unminimize();
+                                let _ = window.set_focus();
+                            }
+                        }
+                        "quit" => {
+                            app.exit(0);
+                        }
+                        _ => {}
+                    })
+                    .build(app)?
+            } else {
+                TrayIconBuilder::new()
+                    .menu(&menu)
+                    .tooltip("Sone")
+                    .build(app)?
+            };
+            // Keep tray icon alive
+            app.manage(tray_icon);
+
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                let app = window.app_handle();
+                let state = app.state::<AppState>();
+                if state.minimize_to_tray.load(Ordering::Relaxed) {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
         })
         .invoke_handler(tauri::generate_handler![
             // auth
@@ -203,6 +284,8 @@ pub fn run() {
             commands::utility::get_image_bytes,
             commands::utility::get_cache_stats,
             commands::utility::clear_disk_cache,
+            commands::utility::get_minimize_to_tray,
+            commands::utility::set_minimize_to_tray,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

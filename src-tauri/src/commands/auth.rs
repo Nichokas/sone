@@ -176,6 +176,7 @@ pub async fn import_session(
         last_track_id: None,
         client_id: String::new(),
         client_secret: String::new(),
+        minimize_to_tray: false,
     });
     settings.auth_tokens = Some(final_tokens.clone());
     settings.client_id = client_id;
@@ -216,6 +217,7 @@ pub async fn poll_device_auth(
                 last_track_id: None,
                 client_id: String::new(),
                 client_secret: String::new(),
+                minimize_to_tray: false,
             });
             settings.auth_tokens = Some(tokens.clone());
             settings.client_id = client_id;
@@ -241,6 +243,7 @@ pub async fn refresh_tidal_auth(state: State<'_, AppState>) -> Result<AuthTokens
         last_track_id: None,
         client_id: client.client_id.clone(),
         client_secret: client.client_secret.clone(),
+        minimize_to_tray: false,
     });
     settings.auth_tokens = Some(new_tokens.clone());
     state.save_settings(&settings)?;
@@ -304,6 +307,7 @@ pub async fn complete_pkce_auth(
         last_track_id: None,
         client_id: String::new(),
         client_secret: String::new(),
+        minimize_to_tray: false,
     });
     settings.auth_tokens = Some(tokens.clone());
     settings.client_id = client_id;

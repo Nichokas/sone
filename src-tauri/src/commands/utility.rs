@@ -1,3 +1,4 @@
+use std::sync::atomic::Ordering;
 use tauri::State;
 
 use crate::AppState;
@@ -37,5 +38,27 @@ pub async fn get_cache_stats(state: State<'_, AppState>) -> Result<crate::cache:
 pub async fn clear_disk_cache(state: State<'_, AppState>) -> Result<(), SoneError> {
     log::info!("[clear_disk_cache]: user-initiated cache clear");
     state.disk_cache.clear().await;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn get_minimize_to_tray(state: State<'_, AppState>) -> bool {
+    state.minimize_to_tray.load(Ordering::Relaxed)
+}
+
+#[tauri::command]
+pub fn set_minimize_to_tray(state: State<'_, AppState>, enabled: bool) -> Result<(), SoneError> {
+    state.minimize_to_tray.store(enabled, Ordering::Relaxed);
+    // Persist to settings
+    let mut settings = state.load_settings().unwrap_or(crate::Settings {
+        auth_tokens: None,
+        volume: 1.0,
+        last_track_id: None,
+        client_id: String::new(),
+        client_secret: String::new(),
+        minimize_to_tray: false,
+    });
+    settings.minimize_to_tray = enabled;
+    state.save_settings(&settings)?;
     Ok(())
 }
