@@ -401,6 +401,13 @@ pub async fn remove_favorite_album(state: State<'_, AppState>, user_id: u64, alb
 }
 
 #[tauri::command(rename_all = "camelCase")]
+pub async fn get_favorite_playlist_uuids(state: State<'_, AppState>, user_id: u64) -> Result<Vec<String>, SoneError> {
+    log::debug!("[get_favorite_playlist_uuids]: user_id={}", user_id);
+    let client = state.tidal_client.lock().await;
+    client.get_favorite_playlist_uuids(user_id).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
 pub async fn add_favorite_playlist(state: State<'_, AppState>, user_id: u64, playlist_uuid: String) -> Result<(), SoneError> {
     log::debug!("[add_favorite_playlist]: user_id={}, playlist_uuid={}", user_id, playlist_uuid);
     let client = state.tidal_client.lock().await;
@@ -418,6 +425,60 @@ pub async fn remove_favorite_playlist(state: State<'_, AppState>, user_id: u64, 
     drop(client);
     state.disk_cache.invalidate_tag("fav-playlists").await;
     Ok(())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn get_favorite_artist_ids(state: State<'_, AppState>, user_id: u64) -> Result<Vec<u64>, SoneError> {
+    log::debug!("[get_favorite_artist_ids]: user_id={}", user_id);
+    let client = state.tidal_client.lock().await;
+    client.get_favorite_artist_ids(user_id).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn add_favorite_artist(state: State<'_, AppState>, user_id: u64, artist_id: u64) -> Result<(), SoneError> {
+    log::debug!("[add_favorite_artist]: user_id={}, artist_id={}", user_id, artist_id);
+    let client = state.tidal_client.lock().await;
+    client.add_favorite_artist(user_id, artist_id).await?;
+    drop(client);
+    state.disk_cache.invalidate_tag("fav-artists").await;
+    Ok(())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn remove_favorite_artist(state: State<'_, AppState>, user_id: u64, artist_id: u64) -> Result<(), SoneError> {
+    log::debug!("[remove_favorite_artist]: user_id={}, artist_id={}", user_id, artist_id);
+    let client = state.tidal_client.lock().await;
+    client.remove_favorite_artist(user_id, artist_id).await?;
+    drop(client);
+    state.disk_cache.invalidate_tag("fav-artists").await;
+    Ok(())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn add_favorite_mix(state: State<'_, AppState>, mix_id: String) -> Result<(), SoneError> {
+    log::debug!("[add_favorite_mix]: mix_id={}", mix_id);
+    let client = state.tidal_client.lock().await;
+    client.add_favorite_mix(&mix_id).await?;
+    drop(client);
+    state.disk_cache.invalidate_tag("fav-mixes").await;
+    Ok(())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn remove_favorite_mix(state: State<'_, AppState>, mix_id: String) -> Result<(), SoneError> {
+    log::debug!("[remove_favorite_mix]: mix_id={}", mix_id);
+    let client = state.tidal_client.lock().await;
+    client.remove_favorite_mix(&mix_id).await?;
+    drop(client);
+    state.disk_cache.invalidate_tag("fav-mixes").await;
+    Ok(())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn get_favorite_mix_ids(state: State<'_, AppState>) -> Result<Vec<String>, SoneError> {
+    log::debug!("[get_favorite_mix_ids]");
+    let client = state.tidal_client.lock().await;
+    client.get_favorite_mix_ids().await
 }
 
 #[tauri::command(rename_all = "camelCase")]

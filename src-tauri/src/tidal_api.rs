@@ -874,6 +874,38 @@ impl TidalClient {
         Ok(())
     }
 
+    pub async fn get_favorite_playlist_uuids(&self, user_id: u64) -> Result<Vec<String>, SoneError> {
+        let tokens = self.tokens.as_ref().ok_or(SoneError::NotAuthenticated)?;
+        let response = self
+            .client
+            .get(format!("{}/users/{}/favorites/playlists", TIDAL_API_URL, user_id))
+            .header("Authorization", format!("Bearer {}", tokens.access_token))
+            .query(&[
+                ("countryCode", self.country_code.as_str()),
+                ("limit", "2000"),
+                ("offset", "0"),
+            ])
+            .send()
+            .await?;
+
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+
+        if !status.is_success() {
+            return Err(SoneError::Api { status: status.as_u16(), body });
+        }
+
+        #[derive(Deserialize)]
+        struct FavItem { item: TidalPlaylistRaw }
+        #[derive(Deserialize)]
+        struct FavResponse { #[serde(default)] items: Vec<FavItem> }
+
+        let data = serde_json::from_str::<FavResponse>(&body)
+            .map_err(|e| SoneError::Parse(e.to_string()))?;
+
+        Ok(data.items.into_iter().map(|f| f.item.uuid).collect())
+    }
+
     pub async fn get_favorite_playlists(&mut self, user_id: u64) -> Result<Vec<TidalPlaylist>, SoneError> {
         let cc = self.country_code.clone();
         let body = self.api_get_body(
@@ -1334,6 +1366,181 @@ impl TidalClient {
         }
 
         Ok(())
+    }
+
+    pub async fn get_favorite_artist_ids(&self, user_id: u64) -> Result<Vec<u64>, SoneError> {
+        let tokens = self.tokens.as_ref().ok_or(SoneError::NotAuthenticated)?;
+        let response = self
+            .client
+            .get(format!("{}/users/{}/favorites/artists", TIDAL_API_URL, user_id))
+            .header("Authorization", format!("Bearer {}", tokens.access_token))
+            .query(&[
+                ("countryCode", self.country_code.as_str()),
+                ("limit", "2000"),
+                ("offset", "0"),
+                ("order", "DATE"),
+                ("orderDirection", "DESC"),
+            ])
+            .send()
+            .await?;
+
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+
+        if !status.is_success() {
+            return Err(SoneError::Api { status: status.as_u16(), body });
+        }
+
+        #[derive(Deserialize)]
+        struct FavItem { item: TidalArtistDetail }
+        #[derive(Deserialize)]
+        struct FavResponse { #[serde(default)] items: Vec<FavItem> }
+
+        let data = serde_json::from_str::<FavResponse>(&body)
+            .map_err(|e| SoneError::Parse(e.to_string()))?;
+
+        Ok(data.items.into_iter().map(|f| f.item.id).collect())
+    }
+
+    pub async fn add_favorite_artist(&self, user_id: u64, artist_id: u64) -> Result<(), SoneError> {
+        let tokens = self.tokens.as_ref().ok_or(SoneError::NotAuthenticated)?;
+        let artist_id_str = artist_id.to_string();
+
+        let response = self
+            .client
+            .post(format!("{}/users/{}/favorites/artists", TIDAL_API_URL, user_id))
+            .header("Authorization", format!("Bearer {}", tokens.access_token))
+            .query(&[("countryCode", self.country_code.as_str())])
+            .form(&[("artistId", artist_id_str.as_str())])
+            .send()
+            .await?;
+
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+
+        if !status.is_success() {
+            return Err(SoneError::Api { status: status.as_u16(), body });
+        }
+
+        Ok(())
+    }
+
+    pub async fn remove_favorite_artist(&self, user_id: u64, artist_id: u64) -> Result<(), SoneError> {
+        let tokens = self.tokens.as_ref().ok_or(SoneError::NotAuthenticated)?;
+
+        let response = self
+            .client
+            .delete(format!(
+                "{}/users/{}/favorites/artists/{}",
+                TIDAL_API_URL, user_id, artist_id
+            ))
+            .header("Authorization", format!("Bearer {}", tokens.access_token))
+            .query(&[("countryCode", self.country_code.as_str())])
+            .send()
+            .await?;
+
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+
+        if !status.is_success() {
+            return Err(SoneError::Api { status: status.as_u16(), body });
+        }
+
+        Ok(())
+    }
+
+    pub async fn add_favorite_mix(&self, mix_id: &str) -> Result<(), SoneError> {
+        let tokens = self.tokens.as_ref().ok_or(SoneError::NotAuthenticated)?;
+
+        log::debug!("[add_favorite_mix]: mix_id={}", mix_id);
+
+        let response = self
+            .client
+            .put(format!("{}/favorites/mixes/add", TIDAL_API_V2_URL))
+            .header("Authorization", format!("Bearer {}", tokens.access_token))
+            .query(&[
+                ("countryCode", self.country_code.as_str()),
+                ("mixIds", mix_id),
+                ("onArtifactNotFound", "FAIL"),
+            ])
+            .send()
+            .await?;
+
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+
+        log::debug!("[add_favorite_mix]: status={}, body={}", status, &body[..body.len().min(500)]);
+
+        if !status.is_success() {
+            return Err(SoneError::Api { status: status.as_u16(), body });
+        }
+
+        Ok(())
+    }
+
+    pub async fn remove_favorite_mix(&self, mix_id: &str) -> Result<(), SoneError> {
+        let tokens = self.tokens.as_ref().ok_or(SoneError::NotAuthenticated)?;
+
+        log::debug!("[remove_favorite_mix]: mix_id={}", mix_id);
+
+        let response = self
+            .client
+            .put(format!("{}/favorites/mixes/remove", TIDAL_API_V2_URL))
+            .header("Authorization", format!("Bearer {}", tokens.access_token))
+            .query(&[
+                ("countryCode", self.country_code.as_str()),
+                ("mixIds", mix_id),
+            ])
+            .send()
+            .await?;
+
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+
+        log::debug!("[remove_favorite_mix]: status={}, body={}", status, &body[..body.len().min(500)]);
+
+        if !status.is_success() {
+            return Err(SoneError::Api { status: status.as_u16(), body });
+        }
+
+        Ok(())
+    }
+
+    /// Fetch favorite mix IDs from api.tidal.com/v2/favorites/mixes.
+    pub async fn get_favorite_mix_ids(&self) -> Result<Vec<String>, SoneError> {
+        let tokens = self.tokens.as_ref().ok_or(SoneError::NotAuthenticated)?;
+
+        let response = self
+            .client
+            .get(format!("{}/favorites/mixes", TIDAL_API_V2_URL))
+            .header("Authorization", format!("Bearer {}", tokens.access_token))
+            .query(&[
+                ("countryCode", self.country_code.as_str()),
+                ("limit", "2000"),
+                ("offset", "0"),
+            ])
+            .send()
+            .await?;
+
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+
+        log::debug!("[get_favorite_mix_ids]: status={}, body_len={}", status, body.len());
+
+        if !status.is_success() {
+            return Err(SoneError::Api { status: status.as_u16(), body });
+        }
+
+        // Response is an array of mix objects with "id" field
+        let items: Vec<serde_json::Value> = serde_json::from_str(&body)
+            .unwrap_or_default();
+        let ids: Vec<String> = items
+            .iter()
+            .filter_map(|item| item.get("id").and_then(|v| v.as_str()).map(|s| s.to_string()))
+            .collect();
+
+        log::debug!("[get_favorite_mix_ids]: found {} mix IDs", ids.len());
+        Ok(ids)
     }
 
     pub async fn add_tracks_to_playlist(&self, playlist_id: &str, track_ids: &[u64]) -> Result<(), SoneError> {

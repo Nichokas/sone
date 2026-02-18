@@ -5,6 +5,8 @@ import {
   ListMusic,
   Heart,
   Loader2,
+  UserPlus,
+  UserCheck,
 } from "lucide-react";
 import { useState, useRef, useEffect, useCallback } from "react";
 import { useToast } from "../contexts/ToastContext";
@@ -12,7 +14,6 @@ import { type MediaItemType, type Track } from "../types";
 import { fetchMediaTracks } from "../api/tidal";
 import { usePlaybackActions } from "../hooks/usePlaybackActions";
 import { useFavorites } from "../hooks/useFavorites";
-import { usePlaylists } from "../hooks/usePlaylists";
 import AddToPlaylistMenu from "./AddToPlaylistMenu";
 
 interface MediaContextMenuProps {
@@ -36,10 +37,16 @@ export default function MediaContextMenu({
     favoriteAlbumIds,
     addFavoriteAlbum,
     removeFavoriteAlbum,
+    favoritePlaylistUuids,
     addFavoritePlaylist,
     removeFavoritePlaylist,
+    followedArtistIds,
+    followArtist,
+    unfollowArtist,
+    favoriteMixIds,
+    addFavoriteMix,
+    removeFavoriteMix,
   } = useFavorites();
-  const { favoritePlaylists } = usePlaylists();
   const { showToast } = useToast();
 
   const menuRef = useRef<HTMLDivElement>(null);
@@ -65,12 +72,16 @@ export default function MediaContextMenu({
     if (item.type === "album") {
       setIsFav(favoriteAlbumIds.has(item.id));
     } else if (item.type === "playlist") {
-      setIsFav(favoritePlaylists.some((p) => p.uuid === item.uuid));
+      setIsFav(favoritePlaylistUuids.has(item.uuid));
+    } else if (item.type === "artist") {
+      setIsFav(followedArtistIds.has(item.id));
+    } else if (item.type === "mix") {
+      setIsFav(favoriteMixIds.has(item.mixId));
     } else {
       setIsFav(null);
     }
     setCheckingFav(false);
-  }, [item, favoriteAlbumIds, favoritePlaylists]);
+  }, [item, favoriteAlbumIds, favoritePlaylistUuids, followedArtistIds, favoriteMixIds]);
 
   // Position the menu at cursor, clamped to viewport
   useEffect(() => {
@@ -131,7 +142,8 @@ export default function MediaContextMenu({
   }, [onClose, showPlaylistSubmenu]);
 
   /** Short display label for the media item */
-  const itemLabel = item.title.length > 30 ? item.title.slice(0, 28) + "…" : item.title;
+  const rawLabel = item.type === "artist" ? item.name : item.title;
+  const itemLabel = rawLabel.length > 30 ? rawLabel.slice(0, 28) + "…" : rawLabel;
 
   // Helper: fetch tracks and perform an action
   const withTracks = useCallback(
@@ -200,21 +212,33 @@ export default function MediaContextMenu({
       if (item.type === "album") {
         if (isFav) {
           await removeFavoriteAlbum(item.id);
-          setIsFav(false);
           showToast(`Removed "${itemLabel}" from library`);
         } else {
           await addFavoriteAlbum(item.id);
-          setIsFav(true);
           showToast(`Added "${itemLabel}" to library`);
         }
       } else if (item.type === "playlist") {
         if (isFav) {
           await removeFavoritePlaylist(item.uuid);
-          setIsFav(false);
           showToast(`Removed "${itemLabel}" from library`);
         } else {
           await addFavoritePlaylist(item.uuid);
-          setIsFav(true);
+          showToast(`Added "${itemLabel}" to library`);
+        }
+      } else if (item.type === "artist") {
+        if (isFav) {
+          await unfollowArtist(item.id);
+          showToast(`Unfollowed "${itemLabel}"`);
+        } else {
+          await followArtist(item.id);
+          showToast(`Following "${itemLabel}"`);
+        }
+      } else if (item.type === "mix") {
+        if (isFav) {
+          await removeFavoriteMix(item.mixId);
+          showToast(`Removed "${itemLabel}" from library`);
+        } else {
+          await addFavoriteMix(item.mixId);
           showToast(`Added "${itemLabel}" to library`);
         }
       }
@@ -228,6 +252,8 @@ export default function MediaContextMenu({
     item, isFav, itemLabel,
     addFavoriteAlbum, removeFavoriteAlbum,
     addFavoritePlaylist, removeFavoritePlaylist,
+    followArtist, unfollowArtist,
+    addFavoriteMix, removeFavoriteMix,
     onClose, showToast,
   ]);
 
@@ -236,8 +262,8 @@ export default function MediaContextMenu({
 
   const isLoading = (action: string) => loadingAction === action;
 
-  // Whether "Add to library" is supported for this item type
-  const canFavorite = item.type === "album" || item.type === "playlist";
+  // Whether "Add to library" / "Follow" is supported for this item type
+  const canFavorite = item.type === "album" || item.type === "playlist" || item.type === "artist" || item.type === "mix";
 
   return (
     <>
@@ -301,7 +327,7 @@ export default function MediaContextMenu({
           <span>Add to playlist</span>
         </button>
 
-        {/* Add to / Remove from library (albums & playlists only) */}
+        {/* Add to / Remove from library / Follow artist */}
         {canFavorite && (
           <>
             <div className="my-1 border-t border-th-inset" />
@@ -312,6 +338,12 @@ export default function MediaContextMenu({
             >
               {isLoading("favorite") || checkingFav ? (
                 <Loader2 size={18} className="shrink-0 text-th-text-muted animate-spin" />
+              ) : item.type === "artist" ? (
+                isFav ? (
+                  <UserCheck size={18} className="shrink-0 text-th-accent" />
+                ) : (
+                  <UserPlus size={18} className="shrink-0 text-th-text-muted" />
+                )
               ) : (
                 <Heart
                   size={18}
@@ -319,7 +351,11 @@ export default function MediaContextMenu({
                   fill={isFav ? "currentColor" : "none"}
                 />
               )}
-              <span>{isFav ? "Remove from my library" : "Add to my library"}</span>
+              <span>
+                {item.type === "artist"
+                  ? (isFav ? "Unfollow artist" : "Follow artist")
+                  : (isFav ? "Remove from my library" : "Add to my library")}
+              </span>
             </button>
           </>
         )}

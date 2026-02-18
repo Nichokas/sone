@@ -33,7 +33,12 @@ export default function HomeSection({ section }: HomeSectionProps) {
     navigateToArtist,
     navigateToMix,
   } = useNavigation();
-  const { favoriteAlbumIds, addFavoriteAlbum, removeFavoriteAlbum } = useFavorites();
+  const {
+    favoriteAlbumIds, addFavoriteAlbum, removeFavoriteAlbum,
+    favoritePlaylistUuids, addFavoritePlaylist, removeFavoritePlaylist,
+    followedArtistIds, followArtist, unfollowArtist,
+    favoriteMixIds, addFavoriteMix, removeFavoriteMix,
+  } = useFavorites();
   const scrollRef = useRef<HTMLDivElement>(null);
   const [canScrollLeft, setCanScrollLeft] = useState(false);
   const [canScrollRight, setCanScrollRight] = useState(true);
@@ -61,8 +66,15 @@ export default function HomeSection({ section }: HomeSectionProps) {
           };
         }
       } else if (isArtistItem(item, section.sectionType)) {
-        // Artists don't get a context menu
-        return;
+        const artistId = item.id;
+        if (artistId) {
+          mediaItem = {
+            type: "artist",
+            id: artistId,
+            name: item.name || getItemTitle(item),
+            picture: item.picture,
+          };
+        }
       } else if (item.uuid) {
         // Playlist
         mediaItem = {
@@ -220,23 +232,69 @@ export default function HomeSection({ section }: HomeSectionProps) {
         className="flex gap-4 overflow-x-auto no-scrollbar scroll-smooth pb-2"
       >
         {items.map((item: any) => {
-          const isAlbum = !isArtistItem(item, section.sectionType) && !isMixItem(item, section.sectionType) && !isTrackItem(item, section.sectionType) && !item.uuid && item.id;
+          const isArtist = isArtistItem(item, section.sectionType);
+          const isMix = isMixItem(item, section.sectionType);
+          const isTrack = isTrackItem(item, section.sectionType);
+          const isPlaylist = !isArtist && !isMix && !isTrack && !!item.uuid;
+          const isAlbum = !isArtist && !isMix && !isTrack && !item.uuid && item.id;
+
+          let isFavorited: boolean | undefined;
+          let onFavoriteToggle: ((e: React.MouseEvent) => void) | undefined;
+
+          if (isAlbum) {
+            isFavorited = favoriteAlbumIds.has(item.id);
+            onFavoriteToggle = (e) => {
+              e.stopPropagation();
+              if (favoriteAlbumIds.has(item.id)) {
+                removeFavoriteAlbum(item.id);
+              } else {
+                addFavoriteAlbum(item.id, item);
+              }
+            };
+          } else if (isArtist && item.id) {
+            isFavorited = followedArtistIds.has(item.id);
+            onFavoriteToggle = (e) => {
+              e.stopPropagation();
+              if (followedArtistIds.has(item.id)) {
+                unfollowArtist(item.id);
+              } else {
+                followArtist(item.id, { id: item.id, name: item.name, picture: item.picture });
+              }
+            };
+          } else if (isPlaylist && item.uuid) {
+            isFavorited = favoritePlaylistUuids.has(item.uuid);
+            onFavoriteToggle = (e) => {
+              e.stopPropagation();
+              if (favoritePlaylistUuids.has(item.uuid)) {
+                removeFavoritePlaylist(item.uuid);
+              } else {
+                addFavoritePlaylist(item.uuid, item);
+              }
+            };
+          } else if (isMix) {
+            const mixId = item.mixId || item.id?.toString();
+            if (mixId) {
+              isFavorited = favoriteMixIds.has(mixId);
+              onFavoriteToggle = (e) => {
+                e.stopPropagation();
+                if (favoriteMixIds.has(mixId)) {
+                  removeFavoriteMix(mixId);
+                } else {
+                  addFavoriteMix(mixId);
+                }
+              };
+            }
+          }
+
           return (
             <MediaCard
               key={getItemId(item)}
               item={item}
               onClick={() => handleItemClick(item)}
               onContextMenu={(e) => handleContextMenu(e, item)}
-              isArtist={isArtistItem(item, section.sectionType)}
-              isFavorited={isAlbum ? favoriteAlbumIds.has(item.id) : undefined}
-              onFavoriteToggle={isAlbum ? (e) => {
-                e.stopPropagation();
-                if (favoriteAlbumIds.has(item.id)) {
-                  removeFavoriteAlbum(item.id);
-                } else {
-                  addFavoriteAlbum(item.id, item);
-                }
-              } : undefined}
+              isArtist={isArtist}
+              isFavorited={isFavorited}
+              onFavoriteToggle={onFavoriteToggle}
               widthClass="w-[180px] flex-shrink-0"
             />
           );

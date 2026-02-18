@@ -213,11 +213,12 @@ export interface ArtistDetail {
   picture?: string;
 }
 
-/** Union type describing a right-clickable media item (album / playlist / mix) */
+/** Union type describing a right-clickable media item (album / playlist / mix / artist) */
 export type MediaItemType =
   | { type: "album"; id: number; title: string; cover?: string; artistName?: string }
   | { type: "playlist"; uuid: string; title: string; image?: string; creatorName?: string }
-  | { type: "mix"; mixId: string; title: string; image?: string; subtitle?: string };
+  | { type: "mix"; mixId: string; title: string; image?: string; subtitle?: string }
+  | { type: "artist"; id: number; name: string; picture?: string };
 
 export interface PlaybackSnapshot {
   currentTrack: Track | null;

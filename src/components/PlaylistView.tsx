@@ -1,4 +1,4 @@
-import { Play, Pause, Music, X, Shuffle, Heart, Loader2, MoreHorizontal } from "lucide-react";
+import { Play, Pause, Music, X, Shuffle, Heart, MoreHorizontal } from "lucide-react";
 import { useEffect, useMemo, useState, useCallback, useRef, startTransition } from "react";
 import { useAtomValue } from "jotai";
 import { isPlayingAtom, currentTrackAtom } from "../atoms/playback";
@@ -240,26 +240,19 @@ export default function PlaylistView({
 
   const playlistPlaying = !!(currentTrack && trackIds.has(currentTrack.id) && isPlaying);
 
-  // Favorite state
-  const { addFavoritePlaylist, removeFavoritePlaylist } = useFavorites();
-  const [playlistFavorited, setPlaylistFavorited] = useState(false);
-  const [favoritePending, setFavoritePending] = useState(false);
+  // Favorite state — driven by atom for instant updates everywhere
+  const { favoritePlaylistUuids, addFavoritePlaylist, removeFavoritePlaylist } = useFavorites();
+  const playlistFavorited = favoritePlaylistUuids.has(playlistId);
 
   const handleToggleFavorite = async () => {
-    if (favoritePending) return;
-    const next = !playlistFavorited;
-    setFavoritePending(true);
     try {
-      if (next) {
-        await addFavoritePlaylist(playlistId);
-      } else {
+      if (playlistFavorited) {
         await removeFavoritePlaylist(playlistId);
+      } else {
+        await addFavoritePlaylist(playlistId);
       }
-      setPlaylistFavorited(next);
     } catch (err) {
       console.error("Failed to toggle playlist favorite:", err);
-    } finally {
-      setFavoritePending(false);
     }
   };
 
@@ -382,23 +375,18 @@ export default function PlaylistView({
         <div className="flex items-center gap-2 relative">
           <button
             onClick={handleToggleFavorite}
-            disabled={favoritePending}
             className={`w-10 h-10 rounded-full flex items-center justify-center transition-[color,filter] duration-150 ${
               playlistFavorited
                 ? "text-th-accent hover:brightness-110"
                 : "text-th-text-muted hover:text-white hover:bg-white/8"
-            } disabled:opacity-60 disabled:cursor-not-allowed`}
+            }`}
             title={playlistFavorited ? "Remove from favorites" : "Add to favorites"}
           >
-            {favoritePending ? (
-              <Loader2 size={18} className="animate-spin" />
-            ) : (
-              <Heart
-                size={20}
-                fill={playlistFavorited ? "currentColor" : "none"}
-                strokeWidth={playlistFavorited ? 0 : 2}
-              />
-            )}
+            <Heart
+              size={20}
+              fill={playlistFavorited ? "currentColor" : "none"}
+              strokeWidth={playlistFavorited ? 0 : 2}
+            />
           </button>
           <button
             onClick={(e) => {

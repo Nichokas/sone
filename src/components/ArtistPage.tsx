@@ -1,8 +1,9 @@
-import { Play, Pause, User, Music, X, Shuffle } from "lucide-react";
+import { Play, Pause, User, Music, X, Shuffle, UserPlus, UserCheck } from "lucide-react";
 import { useEffect, useMemo, useState, useCallback } from "react";
 import { useAtomValue } from "jotai";
 import { isPlayingAtom, currentTrackAtom } from "../atoms/playback";
 import { usePlaybackActions } from "../hooks/usePlaybackActions";
+import { useFavorites } from "../hooks/useFavorites";
 import { useNavigation } from "../hooks/useNavigation";
 import {
   getArtistDetail,
@@ -57,7 +58,9 @@ export default function ArtistPage({
   const currentTrack = useAtomValue(currentTrackAtom);
   const { playTrack, setQueueTracks, pauseTrack, resumeTrack } =
     usePlaybackActions();
+  const { followedArtistIds, followArtist, unfollowArtist } = useFavorites();
   const { navigateToAlbum } = useNavigation();
+  const isFollowed = followedArtistIds.has(artistId);
 
   const [topTracks, setTopTracks] = useState<Track[]>([]);
   const [albums, setAlbums] = useState<AlbumDetail[]>([]);
@@ -187,6 +190,18 @@ export default function ArtistPage({
       await playTrack(shuffled[0]);
     } catch (err) {
       console.error("Failed to shuffle artist tracks:", err);
+    }
+  };
+
+  const handleToggleFollow = async () => {
+    try {
+      if (isFollowed) {
+        await unfollowArtist(artistId);
+      } else {
+        await followArtist(artistId, { id: artistId, name: artistName, picture });
+      }
+    } catch (err) {
+      console.error("Failed to toggle follow:", err);
     }
   };
 
@@ -353,6 +368,17 @@ export default function ArtistPage({
         >
           <Shuffle size={18} />
           Shuffle
+        </button>
+        <button
+          onClick={handleToggleFollow}
+          className={`flex items-center justify-center gap-2 min-w-[120px] px-5 py-2.5 font-bold text-sm rounded-full transition-[transform,filter,background-color] duration-150 hover:scale-[1.03] ${
+            isFollowed
+              ? "bg-th-accent/15 text-th-accent border border-th-accent/30 hover:brightness-110"
+              : "bg-th-button text-white border border-transparent hover:bg-th-button-hover"
+          }`}
+        >
+          {isFollowed ? <UserCheck size={18} /> : <UserPlus size={18} />}
+          {isFollowed ? "Following" : "Follow"}
         </button>
       </div>
 

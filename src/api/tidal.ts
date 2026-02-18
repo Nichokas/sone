@@ -8,6 +8,7 @@ import type {
   Lyrics,
   MediaItemType,
   PaginatedTracks,
+  Playlist,
   SearchResults,
   SuggestionsResponse,
   Track,
@@ -171,6 +172,30 @@ export function addAlbumToFavoritesCache(userId: number, album: AlbumDetail): vo
 export function removeAlbumFromFavoritesCache(userId: number, albumId: number): void {
   mutateCache<AlbumDetail[]>(`fav-albums:${userId}:`, (albums) =>
     albums.filter((a) => a.id !== albumId)
+  );
+}
+
+/** Optimistically prepend a playlist to all cached favorite-playlist pages. */
+export function addPlaylistToFavoritesCache(userId: number, playlist: Playlist): void {
+  mutateCache<Playlist[]>(`fav-playlists:${userId}`, (playlists) => [playlist, ...playlists]);
+}
+
+/** Optimistically remove a playlist from all cached favorite-playlist pages. */
+export function removePlaylistFromFavoritesCache(userId: number, playlistUuid: string): void {
+  mutateCache<Playlist[]>(`fav-playlists:${userId}`, (playlists) =>
+    playlists.filter((p) => p.uuid !== playlistUuid)
+  );
+}
+
+/** Optimistically prepend an artist to all cached followed-artist pages. */
+export function addArtistToFollowedCache(userId: number, artist: ArtistDetail): void {
+  mutateCache<ArtistDetail[]>(`fav-artists:${userId}:`, (artists) => [artist, ...artists]);
+}
+
+/** Optimistically remove an artist from all cached followed-artist pages. */
+export function removeArtistFromFollowedCache(userId: number, artistId: number): void {
+  mutateCache<ArtistDetail[]>(`fav-artists:${userId}:`, (artists) =>
+    artists.filter((a) => a.id !== artistId)
   );
 }
 
@@ -350,7 +375,7 @@ export async function getMixItems(mixId: string): Promise<Track[]> {
   TTL.MEDIUM);
 }
 
-/** Fetch all tracks from a media item (album / playlist / mix) */
+/** Fetch all tracks from a media item (album / playlist / mix / artist) */
 export async function fetchMediaTracks(
   item: MediaItemType
 ): Promise<Track[]> {
@@ -364,6 +389,9 @@ export async function fetchMediaTracks(
     }
     case "mix": {
       return await getMixItems(item.mixId);
+    }
+    case "artist": {
+      return await getArtistTopTracks(item.id);
     }
   }
 }

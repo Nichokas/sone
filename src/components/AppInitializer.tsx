@@ -21,7 +21,13 @@ import {
   userNameAtom,
 } from "../atoms/auth";
 import { userPlaylistsAtom, favoritePlaylistsAtom } from "../atoms/playlists";
-import { favoriteTrackIdsAtom, favoriteAlbumIdsAtom } from "../atoms/favorites";
+import {
+  favoriteTrackIdsAtom,
+  favoriteAlbumIdsAtom,
+  favoritePlaylistUuidsAtom,
+  followedArtistIdsAtom,
+  favoriteMixIdsAtom,
+} from "../atoms/favorites";
 import { currentViewAtom } from "../atoms/navigation";
 import {
   isPlayingAtom,
@@ -64,6 +70,9 @@ export function AppInitializer() {
   const setFavoritePlaylists = useSetAtom(favoritePlaylistsAtom);
   const setFavoriteTrackIds = useSetAtom(favoriteTrackIdsAtom);
   const setFavoriteAlbumIds = useSetAtom(favoriteAlbumIdsAtom);
+  const setFavoritePlaylistUuids = useSetAtom(favoritePlaylistUuidsAtom);
+  const setFollowedArtistIds = useSetAtom(followedArtistIdsAtom);
+  const setFavoriteMixIds = useSetAtom(favoriteMixIdsAtom);
 
   // ---- Playback atom setters (for restore from localStorage) ----
   const setCurrentTrack = useSetAtom(currentTrackAtom);
@@ -177,7 +186,7 @@ export function AppInitializer() {
           }
         }
 
-        // Favorite track IDs + album IDs (parallel)
+        // Favorite IDs — all types in parallel
         Promise.all([
           invoke<number[]>("get_favorite_track_ids", { userId })
             .then((ids) => setFavoriteTrackIds(new Set(ids)))
@@ -185,6 +194,15 @@ export function AppInitializer() {
           invoke<number[]>("get_favorite_album_ids", { userId })
             .then((ids) => setFavoriteAlbumIds(new Set(ids)))
             .catch((error) => console.error("Failed to load favorite album IDs:", error)),
+          invoke<string[]>("get_favorite_playlist_uuids", { userId })
+            .then((uuids) => setFavoritePlaylistUuids(new Set(uuids)))
+            .catch((error) => console.error("Failed to load favorite playlist UUIDs:", error)),
+          invoke<number[]>("get_favorite_artist_ids", { userId })
+            .then((ids) => setFollowedArtistIds(new Set(ids)))
+            .catch((error) => console.error("Failed to load followed artist IDs:", error)),
+          invoke<string[]>("get_favorite_mix_ids")
+            .then((ids) => setFavoriteMixIds(new Set(ids)))
+            .catch((error) => console.error("Failed to load favorite mix IDs:", error)),
         ]);
       } catch (err) {
         console.error("Failed to load saved auth:", err);

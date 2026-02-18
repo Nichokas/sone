@@ -1,29 +1,44 @@
 import { useCallback } from "react";
 import { useAtom, useAtomValue } from "jotai";
 import { invoke } from "@tauri-apps/api/core";
-import { favoriteTrackIdsAtom, favoriteAlbumIdsAtom } from "../atoms/favorites";
+import {
+  favoriteTrackIdsAtom,
+  favoriteAlbumIdsAtom,
+  favoritePlaylistUuidsAtom,
+  followedArtistIdsAtom,
+  favoriteMixIdsAtom,
+} from "../atoms/favorites";
+import { favoritePlaylistsAtom } from "../atoms/playlists";
 import { authTokensAtom } from "../atoms/auth";
 import {
-  invalidateCache,
   addTrackToFavoritesCache,
   removeTrackFromFavoritesCache,
   addAlbumToFavoritesCache,
   removeAlbumFromFavoritesCache,
+  addPlaylistToFavoritesCache,
+  removePlaylistFromFavoritesCache,
+  addArtistToFollowedCache,
+  removeArtistFromFollowedCache,
 } from "../api/tidal";
-import type { Track, AlbumDetail } from "../types";
+import type { Track, AlbumDetail, Playlist, ArtistDetail } from "../types";
 
 export function useFavorites() {
   const [favoriteTrackIds, setFavoriteTrackIds] = useAtom(favoriteTrackIdsAtom);
   const [favoriteAlbumIds, setFavoriteAlbumIds] = useAtom(favoriteAlbumIdsAtom);
+  const [favoritePlaylistUuids, setFavoritePlaylistUuids] = useAtom(favoritePlaylistUuidsAtom);
+  const [, setFavoritePlaylists] = useAtom(favoritePlaylistsAtom);
+  const [followedArtistIds, setFollowedArtistIds] = useAtom(followedArtistIdsAtom);
+  const [favoriteMixIds, setFavoriteMixIds] = useAtom(favoriteMixIdsAtom);
   const authTokens = useAtomValue(authTokensAtom);
 
-  // NOTE: Initial loading of favorite track IDs has been moved to
+  // NOTE: Initial loading of favorite IDs has been moved to
   // AppInitializer to avoid firing once per component that calls useFavorites().
+
+  // ==================== Tracks ====================
 
   const addFavoriteTrack = useCallback(
     async (trackId: number, track?: Track): Promise<void> => {
       if (!authTokens?.user_id) throw new Error("Not authenticated");
-      // Optimistic update — reflect in UI immediately
       setFavoriteTrackIds((prev: Set<number>) => new Set([...prev, trackId]));
       if (track) addTrackToFavoritesCache(authTokens.user_id, track);
       try {
@@ -32,7 +47,6 @@ export function useFavorites() {
           trackId,
         });
       } catch (error: any) {
-        // Revert on failure
         setFavoriteTrackIds((prev: Set<number>) => {
           const next = new Set(prev);
           next.delete(trackId);
@@ -49,7 +63,6 @@ export function useFavorites() {
   const removeFavoriteTrack = useCallback(
     async (trackId: number): Promise<void> => {
       if (!authTokens?.user_id) throw new Error("Not authenticated");
-      // Optimistic update — reflect in UI immediately
       setFavoriteTrackIds((prev: Set<number>) => {
         const next = new Set(prev);
         next.delete(trackId);
@@ -62,7 +75,6 @@ export function useFavorites() {
           trackId,
         });
       } catch (error: any) {
-        // Revert on failure
         setFavoriteTrackIds((prev: Set<number>) => new Set([...prev, trackId]));
         console.error("Failed to remove favorite track:", error);
         throw error;
@@ -71,10 +83,11 @@ export function useFavorites() {
     [authTokens?.user_id, setFavoriteTrackIds]
   );
 
+  // ==================== Albums ====================
+
   const addFavoriteAlbum = useCallback(
     async (albumId: number, album?: AlbumDetail): Promise<void> => {
       if (!authTokens?.user_id) throw new Error("Not authenticated");
-      // Optimistic update
       setFavoriteAlbumIds((prev: Set<number>) => new Set([...prev, albumId]));
       if (album) addAlbumToFavoritesCache(authTokens.user_id, album);
       try {
@@ -83,7 +96,6 @@ export function useFavorites() {
           albumId,
         });
       } catch (error: any) {
-        // Revert on failure
         setFavoriteAlbumIds((prev: Set<number>) => {
           const next = new Set(prev);
           next.delete(albumId);
@@ -100,7 +112,6 @@ export function useFavorites() {
   const removeFavoriteAlbum = useCallback(
     async (albumId: number): Promise<void> => {
       if (!authTokens?.user_id) throw new Error("Not authenticated");
-      // Optimistic update
       setFavoriteAlbumIds((prev: Set<number>) => {
         const next = new Set(prev);
         next.delete(albumId);
@@ -113,7 +124,6 @@ export function useFavorites() {
           albumId,
         });
       } catch (error: any) {
-        // Revert on failure
         setFavoriteAlbumIds((prev: Set<number>) => new Set([...prev, albumId]));
         console.error("Failed to remove favorite album:", error);
         throw error;
@@ -122,38 +132,150 @@ export function useFavorites() {
     [authTokens?.user_id, setFavoriteAlbumIds]
   );
 
+  // ==================== Playlists ====================
+
   const addFavoritePlaylist = useCallback(
-    async (playlistUuid: string): Promise<void> => {
+    async (playlistUuid: string, playlist?: Playlist): Promise<void> => {
       if (!authTokens?.user_id) throw new Error("Not authenticated");
+      setFavoritePlaylistUuids((prev) => new Set([...prev, playlistUuid]));
+      if (playlist) {
+        addPlaylistToFavoritesCache(authTokens.user_id, playlist);
+        setFavoritePlaylists((prev) => [playlist, ...prev.filter((p) => p.uuid !== playlistUuid)]);
+      }
       try {
         await invoke("add_favorite_playlist", {
           userId: authTokens.user_id,
           playlistUuid,
         });
-        invalidateCache("fav-");
       } catch (error: any) {
+        setFavoritePlaylistUuids((prev) => {
+          const next = new Set(prev);
+          next.delete(playlistUuid);
+          return next;
+        });
+        if (playlist) {
+          removePlaylistFromFavoritesCache(authTokens.user_id, playlistUuid);
+          setFavoritePlaylists((prev) => prev.filter((p) => p.uuid !== playlistUuid));
+        }
         console.error("Failed to favorite playlist:", error);
         throw error;
       }
     },
-    [authTokens?.user_id]
+    [authTokens?.user_id, setFavoritePlaylistUuids, setFavoritePlaylists]
   );
 
   const removeFavoritePlaylist = useCallback(
     async (playlistUuid: string): Promise<void> => {
       if (!authTokens?.user_id) throw new Error("Not authenticated");
+      setFavoritePlaylistUuids((prev) => {
+        const next = new Set(prev);
+        next.delete(playlistUuid);
+        return next;
+      });
+      removePlaylistFromFavoritesCache(authTokens.user_id, playlistUuid);
+      setFavoritePlaylists((prev) => prev.filter((p) => p.uuid !== playlistUuid));
       try {
         await invoke("remove_favorite_playlist", {
           userId: authTokens.user_id,
           playlistUuid,
         });
-        invalidateCache("fav-");
       } catch (error: any) {
+        setFavoritePlaylistUuids((prev) => new Set([...prev, playlistUuid]));
+        // Note: favoritePlaylistsAtom is not rolled back — will re-sync on next app load
         console.error("Failed to remove favorite playlist:", error);
         throw error;
       }
     },
-    [authTokens?.user_id]
+    [authTokens?.user_id, setFavoritePlaylistUuids, setFavoritePlaylists]
+  );
+
+  // ==================== Artists (Follow/Unfollow) ====================
+
+  const followArtist = useCallback(
+    async (artistId: number, artist?: ArtistDetail): Promise<void> => {
+      if (!authTokens?.user_id) throw new Error("Not authenticated");
+      setFollowedArtistIds((prev: Set<number>) => new Set([...prev, artistId]));
+      if (artist) addArtistToFollowedCache(authTokens.user_id, artist);
+      try {
+        await invoke("add_favorite_artist", {
+          userId: authTokens.user_id,
+          artistId,
+        });
+      } catch (error: any) {
+        setFollowedArtistIds((prev: Set<number>) => {
+          const next = new Set(prev);
+          next.delete(artistId);
+          return next;
+        });
+        if (artist) removeArtistFromFollowedCache(authTokens.user_id, artistId);
+        console.error("Failed to follow artist:", error);
+        throw error;
+      }
+    },
+    [authTokens?.user_id, setFollowedArtistIds]
+  );
+
+  const unfollowArtist = useCallback(
+    async (artistId: number): Promise<void> => {
+      if (!authTokens?.user_id) throw new Error("Not authenticated");
+      setFollowedArtistIds((prev: Set<number>) => {
+        const next = new Set(prev);
+        next.delete(artistId);
+        return next;
+      });
+      removeArtistFromFollowedCache(authTokens.user_id, artistId);
+      try {
+        await invoke("remove_favorite_artist", {
+          userId: authTokens.user_id,
+          artistId,
+        });
+      } catch (error: any) {
+        setFollowedArtistIds((prev: Set<number>) => new Set([...prev, artistId]));
+        console.error("Failed to unfollow artist:", error);
+        throw error;
+      }
+    },
+    [authTokens?.user_id, setFollowedArtistIds]
+  );
+
+  // ==================== Mixes ====================
+
+  const addFavoriteMix = useCallback(
+    async (mixId: string): Promise<void> => {
+      if (!authTokens?.user_id) throw new Error("Not authenticated");
+      setFavoriteMixIds((prev) => new Set([...prev, mixId]));
+      try {
+        await invoke("add_favorite_mix", { mixId });
+      } catch (error: any) {
+        setFavoriteMixIds((prev) => {
+          const next = new Set(prev);
+          next.delete(mixId);
+          return next;
+        });
+        console.error("Failed to favorite mix:", error);
+        throw error;
+      }
+    },
+    [authTokens?.user_id, setFavoriteMixIds]
+  );
+
+  const removeFavoriteMix = useCallback(
+    async (mixId: string): Promise<void> => {
+      if (!authTokens?.user_id) throw new Error("Not authenticated");
+      setFavoriteMixIds((prev) => {
+        const next = new Set(prev);
+        next.delete(mixId);
+        return next;
+      });
+      try {
+        await invoke("remove_favorite_mix", { mixId });
+      } catch (error: any) {
+        setFavoriteMixIds((prev) => new Set([...prev, mixId]));
+        console.error("Failed to remove favorite mix:", error);
+        throw error;
+      }
+    },
+    [authTokens?.user_id, setFavoriteMixIds]
   );
 
   return {
@@ -163,7 +285,14 @@ export function useFavorites() {
     favoriteAlbumIds,
     addFavoriteAlbum,
     removeFavoriteAlbum,
+    favoritePlaylistUuids,
     addFavoritePlaylist,
     removeFavoritePlaylist,
+    followedArtistIds,
+    followArtist,
+    unfollowArtist,
+    favoriteMixIds,
+    addFavoriteMix,
+    removeFavoriteMix,
   };
 }

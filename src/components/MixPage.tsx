@@ -1,8 +1,9 @@
-import { Play, Pause, Music, Shuffle, MoreHorizontal } from "lucide-react";
+import { Play, Pause, Music, Shuffle, Heart, MoreHorizontal } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { useAtomValue } from "jotai";
 import { isPlayingAtom, currentTrackAtom } from "../atoms/playback";
 import { usePlaybackActions } from "../hooks/usePlaybackActions";
+import { useFavorites } from "../hooks/useFavorites";
 import { getMixItems } from "../api/tidal";
 import { type Track } from "../types";
 import TrackList from "./TrackList";
@@ -112,6 +113,22 @@ export default function MixPage({ mixId, mixInfo, onBack }: MixPageProps) {
     isPlaying
   );
 
+  // Favorite state
+  const { favoriteMixIds, addFavoriteMix, removeFavoriteMix } = useFavorites();
+  const mixFavorited = favoriteMixIds.has(mixId);
+
+  const handleToggleFavorite = async () => {
+    try {
+      if (mixFavorited) {
+        await removeFavoriteMix(mixId);
+      } else {
+        await addFavoriteMix(mixId);
+      }
+    } catch (err) {
+      console.error("Failed to toggle mix favorite:", err);
+    }
+  };
+
   // Context menu
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
 
@@ -200,8 +217,23 @@ export default function MixPage({ mixId, mixInfo, onBack }: MixPageProps) {
             Shuffle
           </button>
         </div>
-        {/* Right — More icon */}
+        {/* Right — Heart & More icons */}
         <div className="flex items-center gap-2 relative">
+          <button
+            onClick={handleToggleFavorite}
+            className={`w-10 h-10 rounded-full flex items-center justify-center transition-[color,filter] duration-150 ${
+              mixFavorited
+                ? "text-th-accent hover:brightness-110"
+                : "text-th-text-muted hover:text-white hover:bg-white/8"
+            }`}
+            title={mixFavorited ? "Remove from favorites" : "Add to favorites"}
+          >
+            <Heart
+              size={20}
+              fill={mixFavorited ? "currentColor" : "none"}
+              strokeWidth={mixFavorited ? 0 : 2}
+            />
+          </button>
           <button
             onClick={(e) => {
               e.stopPropagation();
