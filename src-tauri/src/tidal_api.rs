@@ -98,6 +98,15 @@ pub struct PaginatedTracks {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct PaginatedResponse<T> {
+    pub items: Vec<T>,
+    pub total_number_of_items: u32,
+    pub offset: u32,
+    pub limit: u32,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TidalArtist {
     pub id: u64,
     pub name: String,
@@ -543,9 +552,15 @@ impl TidalClient {
             format!("{}{}", TIDAL_API_URL, path)
         };
         let response = self.authenticated_get(&url, query).await?;
+        let resp_url = response.url();
+        let resp_host = resp_url.host_str().unwrap_or("");
+        if !url.contains(resp_host) {
+            log::warn!("[api_get_body] redirect: {} -> {}", url, resp_url);
+        }
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
         if !status.is_success() {
+            log::error!("[api_get_body] {} -> status={} body={}", url, status, &body[..body.len().min(500)]);
             return Err(SoneError::Api { status: status.as_u16(), body });
         }
         Ok(body)
@@ -752,19 +767,23 @@ impl TidalClient {
         Ok(data.user_id)
     }
 
-    pub async fn get_user_playlists(&mut self, user_id: u64) -> Result<Vec<TidalPlaylist>, SoneError> {
+    pub async fn get_user_playlists(&mut self, user_id: u64, offset: u32, limit: u32) -> Result<PaginatedResponse<TidalPlaylist>, SoneError> {
         let cc = self.country_code.clone();
+        let limit_str = limit.to_string();
+        let offset_str = offset.to_string();
         let body = self.api_get_body(
             &format!("/users/{}/playlists", user_id),
-            &[("countryCode", &cc), ("limit", "50")],
+            &[("countryCode", &cc), ("limit", &limit_str), ("offset", &offset_str)],
         ).await?;
 
         #[derive(Deserialize)]
-        struct PlaylistResponse { items: Vec<TidalPlaylistRaw> }
+        #[serde(rename_all = "camelCase")]
+        struct PlaylistResponse { items: Vec<TidalPlaylistRaw>, total_number_of_items: u32 }
 
         let data: PlaylistResponse = serde_json::from_str(&body)
             .map_err(|e| SoneError::Parse(format!("{} - Body: {}", e, body)))?;
-        Ok(data.items.into_iter().map(|p| p.into()).collect())
+        let playlists: Vec<TidalPlaylist> = data.items.into_iter().map(|p| p.into()).collect();
+        Ok(PaginatedResponse { items: playlists, total_number_of_items: data.total_number_of_items, offset, limit })
     }
 
     pub async fn create_playlist(&self, user_id: u64, title: &str, description: &str) -> Result<TidalPlaylist, SoneError> {
@@ -906,21 +925,25 @@ impl TidalClient {
         Ok(data.items.into_iter().map(|f| f.item.uuid).collect())
     }
 
-    pub async fn get_favorite_playlists(&mut self, user_id: u64) -> Result<Vec<TidalPlaylist>, SoneError> {
+    pub async fn get_favorite_playlists(&mut self, user_id: u64, offset: u32, limit: u32) -> Result<PaginatedResponse<TidalPlaylist>, SoneError> {
         let cc = self.country_code.clone();
+        let limit_str = limit.to_string();
+        let offset_str = offset.to_string();
         let body = self.api_get_body(
             &format!("/users/{}/favorites/playlists", user_id),
-            &[("countryCode", &cc), ("limit", "50")],
+            &[("countryCode", &cc), ("limit", &limit_str), ("offset", &offset_str)],
         ).await?;
 
         #[derive(Deserialize)]
         struct FavEntry { item: TidalPlaylistRaw }
         #[derive(Deserialize)]
-        struct FavResponse { items: Vec<FavEntry> }
+        #[serde(rename_all = "camelCase")]
+        struct FavResponse { items: Vec<FavEntry>, total_number_of_items: u32 }
 
         let data: FavResponse = serde_json::from_str(&body)
             .map_err(|e| SoneError::Parse(format!("{} - Body: {}", e, body)))?;
-        Ok(data.items.into_iter().map(|e| e.item.into()).collect())
+        let playlists: Vec<TidalPlaylist> = data.items.into_iter().map(|e| e.item.into()).collect();
+        Ok(PaginatedResponse { items: playlists, total_number_of_items: data.total_number_of_items, offset, limit })
     }
 
     pub async fn get_playlist_tracks(&mut self, playlist_id: &str) -> Result<Vec<TidalTrack>, SoneError> {
@@ -1508,8 +1531,8 @@ impl TidalClient {
 
     /// Fetch favorite mix IDs from api.tidal.com/v2/favorites/mixes.
     pub async fn get_favorite_mix_ids(&mut self) -> Result<Vec<String>, SoneError> {
-        let mixes = self.get_favorite_mixes().await?;
-        let ids: Vec<String> = mixes
+        let response = self.get_favorite_mixes(0, 50).await?;
+        let ids: Vec<String> = response.items
             .iter()
             .filter_map(|item| item.get("id").and_then(|v| v.as_str()).map(|s| s.to_string()))
             .collect();
@@ -1518,20 +1541,22 @@ impl TidalClient {
     }
 
     /// Fetch full favorite mix objects from api.tidal.com/v2/favorites/mixes.
-    pub async fn get_favorite_mixes(&mut self) -> Result<Vec<serde_json::Value>, SoneError> {
+    pub async fn get_favorite_mixes(&mut self, offset: u32, limit: u32) -> Result<PaginatedResponse<serde_json::Value>, SoneError> {
         let url = format!("{}/favorites/mixes", TIDAL_API_V2_URL);
         let cc = self.country_code.clone();
+        let limit_str = limit.to_string();
+        let offset_str = offset.to_string();
         let body = self.api_get_body(&url, &[
             ("countryCode", &cc),
             ("locale", "en_US"),
             ("deviceType", "BROWSER"),
-            ("limit", "50"),
-            ("offset", "0"),
+            ("limit", &limit_str),
+            ("offset", &offset_str),
         ]).await?;
 
         log::debug!("[get_favorite_mixes]: body_preview={}", &body[..body.len().min(500)]);
 
-        // v2 response is a wrapper object; extract the inner array
+        // v2 response is a wrapper object { items: [...] }; extract the inner array
         let items: Vec<serde_json::Value> = if let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(&body) {
             arr
         } else if let Ok(obj) = serde_json::from_str::<serde_json::Value>(&body) {
@@ -1541,11 +1566,15 @@ impl TidalClient {
                 .cloned()
                 .unwrap_or_default()
         } else {
-            vec![]
+            log::warn!("[get_favorite_mixes]: parse failed - body: {}", &body[..body.len().min(500)]);
+            Vec::new()
         };
 
-        log::debug!("[get_favorite_mixes]: found {} mixes", items.len());
-        Ok(items)
+        let count = items.len() as u32;
+        log::debug!("[get_favorite_mixes]: found {} mixes", count);
+        // v2 API doesn't return totalNumberOfItems — this is a synthetic sentinel for hasMore logic only, not a displayable count
+        let estimated_total = if count == limit { offset + count + 1 } else { offset + count };
+        Ok(PaginatedResponse { items, total_number_of_items: estimated_total, offset, limit })
     }
 
     pub async fn add_tracks_to_playlist(&self, playlist_id: &str, track_ids: &[u64]) -> Result<(), SoneError> {
@@ -2697,24 +2726,26 @@ impl TidalClient {
     }
 
     /// Fetch user's favorite albums as structured data for the sidebar.
-    pub async fn get_favorite_albums(&mut self, user_id: u64, limit: u32) -> Result<Vec<TidalAlbumDetail>, SoneError> {
+    pub async fn get_favorite_albums(&mut self, user_id: u64, offset: u32, limit: u32) -> Result<PaginatedResponse<TidalAlbumDetail>, SoneError> {
         let cc = self.country_code.clone();
         let limit_str = limit.to_string();
+        let offset_str = offset.to_string();
         let body = self.api_get_body(
             &format!("/users/{}/favorites/albums", user_id),
-            &[("countryCode", &cc), ("limit", &limit_str), ("offset", "0"), ("order", "DATE"), ("orderDirection", "DESC")],
+            &[("countryCode", &cc), ("limit", &limit_str), ("offset", &offset_str), ("order", "DATE"), ("orderDirection", "DESC")],
         ).await?;
 
         #[derive(Deserialize)]
         struct FavEntry { item: TidalAlbumDetail }
         #[derive(Deserialize)]
-        struct FavResponse { items: Vec<FavEntry> }
+        #[serde(rename_all = "camelCase")]
+        struct FavResponse { items: Vec<FavEntry>, total_number_of_items: u32 }
 
         let data: FavResponse = serde_json::from_str(&body)
             .map_err(|e| SoneError::Parse(format!("{} - Body: {}", e, body)))?;
         let albums: Vec<TidalAlbumDetail> = data.items.into_iter().map(|e| e.item).collect();
-        log::debug!("[get_favorite_albums]: got {} albums", albums.len());
-        Ok(albums)
+        log::debug!("[get_favorite_albums]: got {} albums (total={})", albums.len(), data.total_number_of_items);
+        Ok(PaginatedResponse { items: albums, total_number_of_items: data.total_number_of_items, offset, limit })
     }
 
     /// Fetch user's playlists as raw JSON for home page sections.

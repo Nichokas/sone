@@ -50,9 +50,11 @@ import {
   getFavoriteTracks,
   getFavoriteArtists,
   getFavoriteAlbums,
+  getUserPlaylists,
+  getFavoritePlaylists,
 } from "../api/tidal";
 
-import type { AuthTokens, Playlist, Track, PlaybackSnapshot } from "../types";
+import type { AuthTokens, Track, PlaybackSnapshot } from "../types";
 import { getTidalImageUrl } from "../types";
 
 const PLAYBACK_STATE_KEY = "sone.playback-state.v1";
@@ -133,13 +135,11 @@ export function AppInitializer() {
 
         // Playlists
         try {
-          const playlists = await invoke<Playlist[]>("get_user_playlists", {
-            userId,
-          });
-          setUserPlaylists(playlists || []);
+          const result = await getUserPlaylists(userId, 0, 50);
+          setUserPlaylists(result.items || []);
 
-          invoke<Playlist[]>("get_favorite_playlists", { userId })
-            .then((fp) => setFavoritePlaylists(fp || []))
+          getFavoritePlaylists(userId, 0, 50)
+            .then((r) => setFavoritePlaylists(r.items || []))
             .catch(() => setFavoritePlaylists([]));
         } catch (playlistErr: any) {
           console.error("Failed to load playlists:", playlistErr);
@@ -165,14 +165,11 @@ export function AppInitializer() {
               };
               setAuthTokens(activeTokens);
 
-              const playlists = await invoke<Playlist[]>(
-                "get_user_playlists",
-                { userId }
-              );
-              setUserPlaylists(playlists || []);
+              const retryResult = await getUserPlaylists(userId, 0, 50);
+              setUserPlaylists(retryResult.items || []);
 
-              invoke<Playlist[]>("get_favorite_playlists", { userId })
-                .then((fp) => setFavoritePlaylists(fp || []))
+              getFavoritePlaylists(userId, 0, 50)
+                .then((r) => setFavoritePlaylists(r.items || []))
                 .catch(() => setFavoritePlaylists([]));
             } catch (refreshErr) {
               console.error("Token refresh failed:", refreshErr);
@@ -230,7 +227,7 @@ export function AppInitializer() {
         getHomePage().catch(() => {}),
         getFavoriteTracks(userId, 0, 50).catch(() => {}),
         getFavoriteArtists(userId, 20).catch(() => {}),
-        getFavoriteAlbums(userId, 20).catch(() => {}),
+        getFavoriteAlbums(userId, 0, 20).catch(() => {}),
       ]).then(() => {
         console.log("[Preload] Cache warmed");
       });

@@ -5,17 +5,19 @@ import {
   Heart,
   Music,
 } from "lucide-react";
-import { usePlaylists } from "../hooks/usePlaylists";
+import { useInfiniteScroll } from "../hooks/useInfiniteScroll";
+import SidebarSkeleton from "./SidebarSkeleton";
+import { getUserPlaylists, getFavoriteAlbums, getFavoriteMixes } from "../api/tidal";
 import { useNavigation } from "../hooks/useNavigation";
 import { useAuth } from "../hooks/useAuth";
-import { getTidalImageUrl, type MediaItemType, type AlbumDetail, type FavoriteMix } from "../types";
-import { getFavoriteAlbums, getFavoriteMixes } from "../api/tidal";
+import { getTidalImageUrl, type MediaItemType, type Playlist } from "../types";
 import TidalImage from "./TidalImage";
 import MediaContextMenu from "./MediaContextMenu";
-import { useState, useEffect, useMemo, useCallback } from "react";
+import { useState, useCallback, useMemo } from "react";
+import { useAtomValue } from "jotai";
+import { favoritePlaylistsAtom } from "../atoms/playlists";
 
 export default function Sidebar() {
-  const { userPlaylists, favoritePlaylists } = usePlaylists();
   const {
     navigateToPlaylist,
     navigateToAlbum,
@@ -28,38 +30,74 @@ export default function Sidebar() {
   const { authTokens } = useAuth();
   const [isCollapsed, setIsCollapsed] = useState(false);
   const [activeFilter, setActiveFilter] = useState<"playlists" | "albums" | "mixes">("playlists");
-  const [favoriteAlbumsList, setFavoriteAlbumsList] = useState<AlbumDetail[]>([]);
-  const [albumsLoading, setAlbumsLoading] = useState(false);
-  const [favoriteMixesList, setFavoriteMixesList] = useState<FavoriteMix[]>([]);
-  const [mixesLoading, setMixesLoading] = useState(false);
 
-  // Fetch favorite albums when switching to albums tab
-  useEffect(() => {
-    if (activeFilter !== "albums" || !authTokens?.user_id) return;
-    let cancelled = false;
-    setAlbumsLoading(true);
-    getFavoriteAlbums(authTokens.user_id)
-      .then((albums) => {
-        if (!cancelled) setFavoriteAlbumsList(albums);
-      })
-      .catch((err) => console.error("Failed to fetch favorite albums:", err))
-      .finally(() => { if (!cancelled) setAlbumsLoading(false); });
-    return () => { cancelled = true; };
-  }, [activeFilter, authTokens?.user_id]);
+  // Playlists: paginate user playlists, merge in favorites from atom (loaded at boot)
+  const favoritePlaylists = useAtomValue(favoritePlaylistsAtom);
 
-  // Fetch favorite mixes when switching to mixes tab
-  useEffect(() => {
-    if (activeFilter !== "mixes") return;
-    let cancelled = false;
-    setMixesLoading(true);
-    getFavoriteMixes()
-      .then((mixes) => {
-        if (!cancelled) setFavoriteMixesList(mixes);
-      })
-      .catch((err) => console.error("Failed to fetch favorite mixes:", err))
-      .finally(() => { if (!cancelled) setMixesLoading(false); });
-    return () => { cancelled = true; };
-  }, [activeFilter]);
+  const playlistFetch = useCallback(async (offset: number, limit: number) => {
+    if (!authTokens?.user_id) return { items: [], totalNumberOfItems: 0 };
+    return getUserPlaylists(authTokens.user_id, offset, limit);
+  }, [authTokens?.user_id]);
+
+  const {
+    items: userPlaylistItems,
+    isInitialLoading: playlistsLoading,
+    isLoadingMore: playlistsLoadingMore,
+    hasMore: playlistsHasMore,
+    sentinelRef: playlistsSentinelRef,
+  } = useInfiniteScroll({
+    fetchPage: playlistFetch,
+    pageSize: 20,
+    enabled: activeFilter === "playlists" && !!authTokens?.user_id,
+  });
+
+  // Merge: user playlists first, then append non-duplicate favorites
+  const allPlaylists = useMemo(() => {
+    const seen = new Set<string>();
+    const merged: Playlist[] = [];
+    for (const p of userPlaylistItems) {
+      if (!seen.has(p.uuid)) { seen.add(p.uuid); merged.push(p); }
+    }
+    for (const p of favoritePlaylists) {
+      if (!seen.has(p.uuid)) { seen.add(p.uuid); merged.push(p); }
+    }
+    return merged;
+  }, [userPlaylistItems, favoritePlaylists]);
+
+  // Albums
+  const albumFetch = useCallback(async (offset: number, limit: number) => {
+    if (!authTokens?.user_id) return { items: [], totalNumberOfItems: 0 };
+    return getFavoriteAlbums(authTokens.user_id, offset, limit);
+  }, [authTokens?.user_id]);
+
+  const {
+    items: favoriteAlbumsList,
+    isInitialLoading: albumsLoading,
+    isLoadingMore: albumsLoadingMore,
+    hasMore: albumsHasMore,
+    sentinelRef: albumsSentinelRef,
+  } = useInfiniteScroll({
+    fetchPage: albumFetch,
+    pageSize: 20,
+    enabled: activeFilter === "albums" && !!authTokens?.user_id,
+  });
+
+  // Mixes
+  const mixFetch = useCallback(async (offset: number, limit: number) => {
+    return getFavoriteMixes(offset, limit);
+  }, []);
+
+  const {
+    items: favoriteMixesList,
+    isInitialLoading: mixesLoading,
+    isLoadingMore: mixesLoadingMore,
+    hasMore: mixesHasMore,
+    sentinelRef: mixesSentinelRef,
+  } = useInfiniteScroll({
+    fetchPage: mixFetch,
+    pageSize: 20,
+    enabled: activeFilter === "mixes" && !!authTokens?.user_id,
+  });
 
   // Context menu state
   const [contextMenu, setContextMenu] = useState<{
@@ -68,7 +106,7 @@ export default function Sidebar() {
   } | null>(null);
 
   const handlePlaylistContextMenu = useCallback(
-    (e: React.MouseEvent, playlist: (typeof allPlaylists)[number]) => {
+    (e: React.MouseEvent, playlist: Playlist) => {
       e.preventDefault();
       e.stopPropagation();
       setContextMenu({
@@ -87,39 +125,20 @@ export default function Sidebar() {
 
   const userId = authTokens?.user_id;
 
-  // Merge user-created + favorited playlists, deduplicated by uuid
-  const allPlaylists = useMemo(() => {
-    const seen = new Set<string>();
-    const merged = [];
-    for (const p of userPlaylists) {
-      if (!seen.has(p.uuid)) {
-        seen.add(p.uuid);
-        merged.push(p);
-      }
-    }
-    for (const p of favoritePlaylists) {
-      if (!seen.has(p.uuid)) {
-        seen.add(p.uuid);
-        merged.push(p);
-      }
-    }
-    return merged;
-  }, [userPlaylists, favoritePlaylists]);
-
-  const isOwnPlaylist = (playlist: (typeof allPlaylists)[number]) => {
+  const isOwnPlaylist = (playlist: Playlist) => {
     if (!userId) return true; // fallback: assume own if we don't know
     return playlist.creator?.id === userId;
   };
 
   /** Resolve a display name for the playlist creator */
-  const getCreatorName = (playlist: (typeof allPlaylists)[number]) => {
+  const getCreatorName = (playlist: Playlist) => {
     if (playlist.creator?.name) return playlist.creator.name;
     // Tidal editorial playlists have creator.id === 0 but no name
     if (playlist.creator?.id === 0) return "TIDAL";
     return undefined;
   };
 
-  const handlePlaylistClick = (playlist: (typeof allPlaylists)[number]) => {
+  const handlePlaylistClick = (playlist: Playlist) => {
     const own = isOwnPlaylist(playlist);
     navigateToPlaylist(playlist.uuid, {
       title: playlist.title,
@@ -210,7 +229,9 @@ export default function Sidebar() {
         <div className="flex-1 overflow-y-auto px-1.5 pb-2 custom-scrollbar">
           {activeFilter === "playlists" ? (
             /* Playlists view */
-            allPlaylists.length === 0 ? (
+            playlistsLoading ? (
+              <SidebarSkeleton count={5} />
+            ) : allPlaylists.length === 0 ? (
               <div
                 className={`px-3 py-8 text-center ${isCollapsed ? "hidden" : ""}`}
               >
@@ -309,15 +330,14 @@ export default function Sidebar() {
                     </button>
                   );
                 })}
+                {playlistsHasMore && <div ref={playlistsSentinelRef} />}
+                {playlistsLoadingMore && <SidebarSkeleton count={2} />}
               </div>
             )
           ) : activeFilter === "albums" ? (
             /* Albums view */
             albumsLoading ? (
-              <div className={`px-3 py-8 text-center ${isCollapsed ? "hidden" : ""}`}>
-                <div className="w-6 h-6 border-2 border-th-accent border-t-transparent rounded-full animate-spin mx-auto" />
-                <p className="text-th-text-muted text-sm mt-3">Loading albums...</p>
-              </div>
+              <SidebarSkeleton count={5} />
             ) : favoriteAlbumsList.length === 0 ? (
               <div className={`px-3 py-8 text-center ${isCollapsed ? "hidden" : ""}`}>
                 <p className="text-th-text-muted text-sm">No favorite albums yet</p>
@@ -372,15 +392,14 @@ export default function Sidebar() {
                     )}
                   </button>
                 ))}
+                {albumsHasMore && <div ref={albumsSentinelRef} />}
+                {albumsLoadingMore && <SidebarSkeleton count={2} />}
               </div>
             )
           ) : (
             /* Mixes view */
             mixesLoading ? (
-              <div className={`px-3 py-8 text-center ${isCollapsed ? "hidden" : ""}`}>
-                <div className="w-6 h-6 border-2 border-th-accent border-t-transparent rounded-full animate-spin mx-auto" />
-                <p className="text-th-text-muted text-sm mt-3">Loading mixes...</p>
-              </div>
+              <SidebarSkeleton count={5} />
             ) : favoriteMixesList.length === 0 ? (
               <div className={`px-3 py-8 text-center ${isCollapsed ? "hidden" : ""}`}>
                 <p className="text-th-text-muted text-sm">No favorite mixes yet</p>
@@ -449,6 +468,8 @@ export default function Sidebar() {
                     )}
                   </button>
                 ))}
+                {mixesHasMore && <div ref={mixesSentinelRef} />}
+                {mixesLoadingMore && <SidebarSkeleton count={2} />}
               </div>
             )
           )}

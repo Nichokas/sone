@@ -52,6 +52,13 @@ export interface PaginatedTracks {
   limit: number;
 }
 
+export interface Paginated<T> {
+  items: T[];
+  totalNumberOfItems: number;
+  offset: number;
+  limit: number;
+}
+
 export type AppView =
   | { type: "home" }
   | {

@@ -5,7 +5,7 @@ import { isAuthenticatedAtom, authTokensAtom, userNameAtom } from "../atoms/auth
 import { userPlaylistsAtom, favoritePlaylistsAtom } from "../atoms/playlists";
 import { isPlayingAtom, currentTrackAtom, queueAtom, historyAtom } from "../atoms/playback";
 import { favoriteTrackIdsAtom } from "../atoms/favorites";
-import { clearCache } from "../api/tidal";
+import { clearCache, getUserPlaylists as fetchUserPlaylists } from "../api/tidal";
 import type { AuthTokens, PkceAuthParams, DeviceAuthResponse, Playlist } from "../types";
 
 const PLAYBACK_STATE_KEY = "sone.playback-state.v1";
@@ -204,9 +204,8 @@ export function useAuth() {
   const getUserPlaylists = useCallback(
     async (userId: number): Promise<Playlist[]> => {
       try {
-        const playlists = await invoke<Playlist[]>("get_user_playlists", {
-          userId: userId,
-        });
+        const result = await fetchUserPlaylists(userId, 0, 50);
+        const playlists = result.items || [];
         setUserPlaylists(playlists);
         return playlists;
       } catch (error) {

@@ -9,6 +9,7 @@ import type {
   HomePageResponse,
   Lyrics,
   MediaItemType,
+  Paginated,
   PaginatedTracks,
   Playlist,
   SearchResults,
@@ -167,26 +168,38 @@ export function removeTrackFromFavoritesCache(userId: number, trackId: number): 
 
 /** Optimistically prepend an album to all cached favorite-album pages. */
 export function addAlbumToFavoritesCache(userId: number, album: AlbumDetail): void {
-  mutateCache<AlbumDetail[]>(`fav-albums:${userId}:`, (albums) => [album, ...albums]);
+  mutateCache<Paginated<AlbumDetail>>(`fav-albums:${userId}:`, (page) => ({
+    ...page,
+    items: [album, ...page.items],
+    totalNumberOfItems: page.totalNumberOfItems + 1,
+  }));
 }
 
 /** Optimistically remove an album from all cached favorite-album pages. */
 export function removeAlbumFromFavoritesCache(userId: number, albumId: number): void {
-  mutateCache<AlbumDetail[]>(`fav-albums:${userId}:`, (albums) =>
-    albums.filter((a) => a.id !== albumId)
-  );
+  mutateCache<Paginated<AlbumDetail>>(`fav-albums:${userId}:`, (page) => ({
+    ...page,
+    items: page.items.filter((a) => a.id !== albumId),
+    totalNumberOfItems: Math.max(0, page.totalNumberOfItems - 1),
+  }));
 }
 
 /** Optimistically prepend a playlist to all cached favorite-playlist pages. */
 export function addPlaylistToFavoritesCache(userId: number, playlist: Playlist): void {
-  mutateCache<Playlist[]>(`fav-playlists:${userId}`, (playlists) => [playlist, ...playlists]);
+  mutateCache<Paginated<Playlist>>(`fav-playlists:${userId}:`, (page) => ({
+    ...page,
+    items: [playlist, ...page.items],
+    totalNumberOfItems: page.totalNumberOfItems + 1,
+  }));
 }
 
 /** Optimistically remove a playlist from all cached favorite-playlist pages. */
 export function removePlaylistFromFavoritesCache(userId: number, playlistUuid: string): void {
-  mutateCache<Playlist[]>(`fav-playlists:${userId}`, (playlists) =>
-    playlists.filter((p) => p.uuid !== playlistUuid)
-  );
+  mutateCache<Paginated<Playlist>>(`fav-playlists:${userId}:`, (page) => ({
+    ...page,
+    items: page.items.filter((p) => p.uuid !== playlistUuid),
+    totalNumberOfItems: Math.max(0, page.totalNumberOfItems - 1),
+  }));
 }
 
 /** Optimistically prepend an artist to all cached followed-artist pages. */
@@ -384,6 +397,7 @@ function parseArtistPageResponse(json: any): ArtistPageData {
         if (result.topTracks.length === 0) {
           result.topTracks = items;
         }
+        console.log("[parseArtistPage] TRACK_LIST showMore:", JSON.stringify(mod?.showMore));
         result.sections.push({ title: title || "Popular tracks", type: "TRACK_LIST", items, apiPath: mod?.showMore?.apiPath });
         continue;
       }
@@ -547,16 +561,42 @@ export async function getFavoriteArtists(
 
 export async function getFavoriteAlbums(
   userId: number,
+  offset: number = 0,
   limit: number = 50
-): Promise<AlbumDetail[]> {
-  return cached(`fav-albums:${userId}:${limit}`, ["fav-albums"], () =>
-    invoke<AlbumDetail[]>("get_favorite_albums", { userId, limit }),
+): Promise<Paginated<AlbumDetail>> {
+  return cached(`fav-albums:${userId}:${offset}:${limit}`, ["fav-albums"], () =>
+    invoke<Paginated<AlbumDetail>>("get_favorite_albums", { userId, offset, limit }),
   TTL.MEDIUM);
 }
 
-export async function getFavoriteMixes(): Promise<FavoriteMix[]> {
-  return cached("fav-mixes", ["fav-mixes"], () =>
-    invoke<FavoriteMix[]>("get_favorite_mixes"),
+export async function getFavoriteMixes(
+  offset: number = 0,
+  limit: number = 20
+): Promise<Paginated<FavoriteMix>> {
+  return cached(`fav-mixes:${offset}:${limit}`, ["fav-mixes"], () =>
+    invoke<Paginated<FavoriteMix>>("get_favorite_mixes", { offset, limit }),
+  TTL.MEDIUM);
+}
+
+// ==================== Playlists (paginated) ====================
+
+export async function getUserPlaylists(
+  userId: number,
+  offset: number = 0,
+  limit: number = 20
+): Promise<Paginated<Playlist>> {
+  return cached(`user-playlists:${userId}:${offset}:${limit}`, ["user-playlists"], () =>
+    invoke<Paginated<Playlist>>("get_user_playlists", { userId, offset, limit }),
+  TTL.MEDIUM);
+}
+
+export async function getFavoritePlaylists(
+  userId: number,
+  offset: number = 0,
+  limit: number = 20
+): Promise<Paginated<Playlist>> {
+  return cached(`fav-playlists:${userId}:${offset}:${limit}`, ["fav-playlists"], () =>
+    invoke<Paginated<Playlist>>("get_favorite_playlists", { userId, offset, limit }),
   TTL.MEDIUM);
 }
 
