@@ -226,7 +226,7 @@ export function AppInitializer() {
       Promise.all([
         getHomePage().catch(() => {}),
         getFavoriteTracks(userId, 0, 50).catch(() => {}),
-        getFavoriteArtists(userId, 20).catch(() => {}),
+        getFavoriteArtists(userId, 0, 20).catch(() => {}),
         getFavoriteAlbums(userId, 0, 20).catch(() => {}),
       ]).then(() => {
         console.log("[Preload] Cache warmed");

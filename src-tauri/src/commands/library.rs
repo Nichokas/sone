@@ -3,7 +3,7 @@ use tauri::{Manager, State};
 use crate::AppState;
 use crate::SoneError;
 use crate::cache::{CacheResult, CacheTier};
-use crate::tidal_api::{PaginatedTracks, TidalAlbumDetail, TidalPlaylist, TidalTrack};
+use crate::tidal_api::{PaginatedTracks, TidalAlbumDetail, TidalArtistDetail, TidalPlaylist, TidalTrack};
 
 #[tauri::command(rename_all = "camelCase")]
 pub async fn get_user_playlists(
@@ -614,21 +614,21 @@ pub async fn get_favorite_artists(
     state: State<'_, AppState>,
     app_handle: tauri::AppHandle,
     user_id: u64,
+    offset: u32,
     limit: u32,
-) -> Result<Vec<crate::tidal_api::TidalArtistDetail>, SoneError> {
-    log::debug!("[get_favorite_artists]: user_id={}, limit={}", user_id, limit);
+) -> Result<crate::tidal_api::PaginatedResponse<TidalArtistDetail>, SoneError> {
+    log::debug!("[get_favorite_artists]: user_id={}, offset={}, limit={}", user_id, offset, limit);
 
-    let cache_key = format!("fav-artists:{}:{}", user_id, limit);
+    let cache_key = format!("fav-artists:{}:{}:{}", user_id, offset, limit);
     match state.disk_cache.get(&cache_key, CacheTier::UserContent).await {
         CacheResult::Fresh(bytes) => {
-            if let Ok(artists) = serde_json::from_slice(&bytes) {
-                return Ok(artists);
+            if let Ok(data) = serde_json::from_slice(&bytes) {
+                return Ok(data);
             }
         }
         CacheResult::Stale(bytes) => {
-            if let Ok(artists) = serde_json::from_slice::<Vec<crate::tidal_api::TidalArtistDetail>>(&bytes) {
+            if let Ok(data) = serde_json::from_slice::<crate::tidal_api::PaginatedResponse<TidalArtistDetail>>(&bytes) {
                 if state.disk_cache.mark_in_flight(&cache_key).await {
-                    // Only retry if last attempt was >5min ago (300s)
                     if state.disk_cache.should_retry_refresh(&cache_key, 300).await {
                         state.disk_cache.mark_refresh_attempt(&cache_key).await;
                         let handle = app_handle.clone();
@@ -637,7 +637,7 @@ pub async fn get_favorite_artists(
                             let st = handle.state::<AppState>();
                             let result = {
                                 let mut client = st.tidal_client.lock().await;
-                                client.get_favorite_artists(user_id, limit).await
+                                client.get_favorite_artists(user_id, offset, limit).await
                             };
                             if let Ok(fresh) = result {
                                 if let Ok(json) = serde_json::to_vec(&fresh) {
@@ -650,18 +650,18 @@ pub async fn get_favorite_artists(
                         state.disk_cache.clear_in_flight(&cache_key).await;
                     }
                 }
-                return Ok(artists);
+                return Ok(data);
             }
         }
         CacheResult::Miss => {}
     }
 
     let mut client = state.tidal_client.lock().await;
-    let artists = client.get_favorite_artists(user_id, limit).await?;
+    let data = client.get_favorite_artists(user_id, offset, limit).await?;
     drop(client);
 
-    if let Ok(json) = serde_json::to_vec(&artists) {
+    if let Ok(json) = serde_json::to_vec(&data) {
         state.disk_cache.put(&cache_key, &json, CacheTier::UserContent, &["fav-artists", &format!("user:{}", user_id)]).await.ok();
     }
-    Ok(artists)
+    Ok(data)
 }

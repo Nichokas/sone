@@ -1,6 +1,6 @@
 import { memo, useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { ListMusic, Play } from "lucide-react";
+import { ListMusic, Play, User } from "lucide-react";
 
 // In-memory blob URL cache — size-based LRU (50 MB) with revokeObjectURL on eviction.
 const MAX_BLOB_BYTES = 200 * 1024 * 1024; // 200 MB
@@ -52,7 +52,7 @@ interface TidalImageProps {
   src: string | undefined;
   alt: string;
   className?: string;
-  type?: "album" | "playlist";
+  type?: "album" | "playlist" | "artist";
 }
 
 function TidalImageComponent({
@@ -92,6 +92,8 @@ function TidalImageComponent({
       >
         {type === "playlist" ? (
           <Play size={24} className="text-gray-600" />
+        ) : type === "artist" ? (
+          <User size={24} className="text-gray-600" />
         ) : (
           <ListMusic size={24} className="text-gray-600" />
         )}

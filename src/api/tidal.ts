@@ -204,14 +204,20 @@ export function removePlaylistFromFavoritesCache(userId: number, playlistUuid: s
 
 /** Optimistically prepend an artist to all cached followed-artist pages. */
 export function addArtistToFollowedCache(userId: number, artist: ArtistDetail): void {
-  mutateCache<ArtistDetail[]>(`fav-artists:${userId}:`, (artists) => [artist, ...artists]);
+  mutateCache<Paginated<ArtistDetail>>(`fav-artists:${userId}:`, (page) => ({
+    ...page,
+    items: [artist, ...page.items],
+    totalNumberOfItems: page.totalNumberOfItems + 1,
+  }));
 }
 
 /** Optimistically remove an artist from all cached followed-artist pages. */
 export function removeArtistFromFollowedCache(userId: number, artistId: number): void {
-  mutateCache<ArtistDetail[]>(`fav-artists:${userId}:`, (artists) =>
-    artists.filter((a) => a.id !== artistId)
-  );
+  mutateCache<Paginated<ArtistDetail>>(`fav-artists:${userId}:`, (page) => ({
+    ...page,
+    items: page.items.filter((a) => a.id !== artistId),
+    totalNumberOfItems: Math.max(0, page.totalNumberOfItems - 1),
+  }));
 }
 
 /** Drop the entire cache (e.g. on logout). */
@@ -619,10 +625,11 @@ export async function getFavoriteTracks(
 
 export async function getFavoriteArtists(
   userId: number,
+  offset: number = 0,
   limit: number = 20
-): Promise<ArtistDetail[]> {
-  return cached(`fav-artists:${userId}:${limit}`, ["fav-artists"], () =>
-    invoke<ArtistDetail[]>("get_favorite_artists", { userId, limit }),
+): Promise<Paginated<ArtistDetail>> {
+  return cached(`fav-artists:${userId}:${offset}:${limit}`, ["fav-artists"], () =>
+    invoke<Paginated<ArtistDetail>>("get_favorite_artists", { userId, offset, limit }),
   TTL.MEDIUM);
 }
 

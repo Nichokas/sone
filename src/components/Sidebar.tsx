@@ -4,13 +4,14 @@ import {
   Library,
   Heart,
   Music,
+  User,
 } from "lucide-react";
 import { useInfiniteScroll } from "../hooks/useInfiniteScroll";
 import SidebarSkeleton from "./SidebarSkeleton";
-import { getUserPlaylists, getFavoriteAlbums, getFavoriteMixes } from "../api/tidal";
+import { getUserPlaylists, getFavoriteAlbums, getFavoriteMixes, getFavoriteArtists } from "../api/tidal";
 import { useNavigation } from "../hooks/useNavigation";
 import { useAuth } from "../hooks/useAuth";
-import { getTidalImageUrl, type MediaItemType, type Playlist } from "../types";
+import { getTidalImageUrl, type MediaItemType, type Playlist, type ArtistDetail } from "../types";
 import TidalImage from "./TidalImage";
 import MediaContextMenu from "./MediaContextMenu";
 import { useState, useCallback, useMemo } from "react";
@@ -21,6 +22,7 @@ export default function Sidebar() {
   const {
     navigateToPlaylist,
     navigateToAlbum,
+    navigateToArtist,
     navigateToMix,
     navigateToFavorites,
     navigateHome,
@@ -29,7 +31,7 @@ export default function Sidebar() {
   } = useNavigation();
   const { authTokens } = useAuth();
   const [isCollapsed, setIsCollapsed] = useState(false);
-  const [activeFilter, setActiveFilter] = useState<"playlists" | "albums" | "mixes">("playlists");
+  const [activeFilter, setActiveFilter] = useState<"playlists" | "albums" | "artists" | "mixes">("playlists");
 
   // Playlists: paginate user playlists, merge in favorites from atom (loaded at boot)
   const favoritePlaylists = useAtomValue(favoritePlaylistsAtom);
@@ -97,6 +99,24 @@ export default function Sidebar() {
     fetchPage: mixFetch,
     pageSize: 20,
     enabled: activeFilter === "mixes" && !!authTokens?.user_id,
+  });
+
+  // Artists
+  const artistFetch = useCallback(async (offset: number, limit: number) => {
+    if (!authTokens?.user_id) return { items: [] as ArtistDetail[], totalNumberOfItems: 0 };
+    return getFavoriteArtists(authTokens.user_id, offset, limit);
+  }, [authTokens?.user_id]);
+
+  const {
+    items: favoriteArtistsList,
+    isInitialLoading: artistsLoading,
+    isLoadingMore: artistsLoadingMore,
+    hasMore: artistsHasMore,
+    sentinelRef: artistsSentinelRef,
+  } = useInfiniteScroll({
+    fetchPage: artistFetch,
+    pageSize: 20,
+    enabled: activeFilter === "artists" && !!authTokens?.user_id,
   });
 
   // Context menu state
@@ -209,7 +229,7 @@ export default function Sidebar() {
         {/* Filter Pills */}
         {!isCollapsed && (
           <div className="px-2 pb-2 flex gap-1.5 overflow-x-auto no-scrollbar">
-            {(["playlists", "albums", "mixes"] as const).map((tab) => (
+            {(["playlists", "albums", "artists", "mixes"] as const).map((tab) => (
               <button
                 key={tab}
                 onClick={() => setActiveFilter(tab)}
@@ -219,7 +239,7 @@ export default function Sidebar() {
                     : "bg-white/[0.07] hover:bg-th-inset text-th-text-secondary"
                 }`}
               >
-                {tab === "playlists" ? "Playlists" : tab === "albums" ? "Albums" : "Mixes"}
+                {tab === "playlists" ? "Playlists" : tab === "albums" ? "Albums" : tab === "artists" ? "Artists" : "Mixes"}
               </button>
             ))}
           </div>
@@ -394,6 +414,80 @@ export default function Sidebar() {
                 ))}
                 {albumsHasMore && <div ref={albumsSentinelRef} />}
                 {albumsLoadingMore && <SidebarSkeleton count={2} />}
+              </div>
+            )
+          ) : activeFilter === "artists" ? (
+            /* Artists view */
+            artistsLoading ? (
+              <SidebarSkeleton count={5} />
+            ) : favoriteArtistsList.length === 0 ? (
+              <div className={`px-3 py-8 text-center ${isCollapsed ? "hidden" : ""}`}>
+                <p className="text-th-text-muted text-sm">No followed artists yet</p>
+              </div>
+            ) : (
+              <div className="space-y-px">
+                {favoriteArtistsList.map((artist) => (
+                  <button
+                    key={artist.id}
+                    onClick={() =>
+                      navigateToArtist(artist.id, {
+                        name: artist.name,
+                        picture: artist.picture,
+                      })
+                    }
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      setContextMenu({
+                        item: {
+                          type: "artist",
+                          id: artist.id,
+                          name: artist.name,
+                          picture: artist.picture,
+                        },
+                        position: { x: e.clientX, y: e.clientY },
+                      });
+                    }}
+                    className={`w-full flex items-center gap-2.5 px-1.5 py-2 rounded-md transition-colors duration-150 group ${
+                      currentView.type === "artist" &&
+                      currentView.artistId === artist.id
+                        ? "bg-white/[0.08]"
+                        : "hover:bg-th-border-subtle"
+                    } ${isCollapsed ? "justify-center" : ""}`}
+                    title={artist.name}
+                  >
+                    <div
+                      className={`bg-th-surface-hover shrink-0 overflow-hidden rounded-full ${
+                        isCollapsed ? "w-10 h-10" : "w-10 h-10"
+                      }`}
+                    >
+                      {artist.picture ? (
+                        <TidalImage
+                          src={getTidalImageUrl(artist.picture, 80)}
+                          alt={artist.name}
+                          type="artist"
+                        />
+                      ) : (
+                        <div className="w-full h-full flex items-center justify-center">
+                          <User size={16} className="text-gray-600" />
+                        </div>
+                      )}
+                    </div>
+
+                    {!isCollapsed && (
+                      <div className="flex-1 min-w-0 text-left">
+                        <div className="text-[14px] font-medium text-white truncate leading-snug">
+                          {artist.name}
+                        </div>
+                        <div className="text-[12px] text-th-text-faint truncate leading-snug mt-0.5">
+                          Artist
+                        </div>
+                      </div>
+                    )}
+                  </button>
+                ))}
+                {artistsHasMore && <div ref={artistsSentinelRef} />}
+                {artistsLoadingMore && <SidebarSkeleton count={2} />}
               </div>
             )
           ) : (
