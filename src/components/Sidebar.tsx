@@ -27,6 +27,7 @@ export default function Sidebar() {
     navigateToFavorites,
     navigateHome,
     navigateToExplore,
+    navigateToLibraryViewAll,
     currentView,
   } = useNavigation();
   const { authTokens } = useAuth();
@@ -224,6 +225,14 @@ export default function Sidebar() {
               <span className="font-semibold text-sm">Your Library</span>
             )}
           </button>
+          {!isCollapsed && (
+            <button
+              onClick={() => navigateToLibraryViewAll(activeFilter)}
+              className="text-xs text-th-text-muted hover:text-white transition-colors px-2.5"
+            >
+              Show all
+            </button>
+          )}
         </div>
 
         {/* Filter Pills */}

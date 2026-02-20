@@ -118,6 +118,13 @@ export function useNavigation() {
     [setCurrentView]
   );
 
+  const navigateToLibraryViewAll = useCallback(
+    (libraryType: "playlists" | "albums" | "artists" | "mixes") => {
+      navigate(setCurrentView, { type: "libraryViewAll", libraryType });
+    },
+    [setCurrentView]
+  );
+
   return {
     currentView,
     navigateToAlbum,
@@ -132,5 +139,6 @@ export function useNavigation() {
     navigateToTrackRadio,
     navigateToExplore,
     navigateToExplorePage,
+    navigateToLibraryViewAll,
   };
 }

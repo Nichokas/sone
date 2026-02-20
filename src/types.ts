@@ -107,6 +107,10 @@ export type AppView =
       type: "artistTracks";
       artistId: number;
       artistName: string;
+    }
+  | {
+      type: "libraryViewAll";
+      libraryType: "playlists" | "albums" | "artists" | "mixes";
     };
 
 export interface SearchResults {

@@ -12,6 +12,7 @@ import MixPage from "./components/MixPage";
 import TrackRadioPage from "./components/TrackRadioPage";
 import ExplorePage from "./components/ExplorePage";
 import ExploreSubPage from "./components/ExploreSubPage";
+import LibraryViewAll from "./components/LibraryViewAll";
 import Login from "./components/Login";
 import { AppInitializer } from "./components/AppInitializer";
 import { useAuth } from "./hooks/useAuth";
@@ -171,6 +172,13 @@ function AppContent() {
             apiPath={currentView.apiPath}
             title={currentView.title}
             onBack={navigateToExplore}
+          />
+        );
+      case "libraryViewAll":
+        return (
+          <LibraryViewAll
+            key={currentView.libraryType}
+            libraryType={currentView.libraryType}
           />
         );
       case "home":

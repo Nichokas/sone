@@ -1,0 +1,478 @@
+import { useState, useEffect, useCallback, useRef, useMemo, startTransition } from "react";
+import { useAuth } from "../hooks/useAuth";
+import { useNavigation } from "../hooks/useNavigation";
+import { useMediaPlay } from "../hooks/useMediaPlay";
+import { useFavorites } from "../hooks/useFavorites";
+import { useAtomValue } from "jotai";
+import { favoritePlaylistsAtom } from "../atoms/playlists";
+import {
+  getUserPlaylists,
+  getFavoriteAlbums,
+  getFavoriteArtists,
+  getFavoriteMixes,
+  getFavoritePlaylists,
+} from "../api/tidal";
+import MediaGrid, { MediaGridSkeleton, MediaGridEmpty } from "./MediaGrid";
+import MediaCard from "./MediaCard";
+import MediaContextMenu from "./MediaContextMenu";
+import DebouncedFilterInput from "./DebouncedFilterInput";
+import { buildMediaItem } from "../utils/itemHelpers";
+import type { MediaItemType, Playlist } from "../types";
+
+type LibraryType = "playlists" | "albums" | "artists" | "mixes";
+
+interface LibraryViewAllProps {
+  libraryType: LibraryType;
+}
+
+const CONFIG = {
+  playlists: {
+    title: "Playlists you love",
+    searchPlaceholder: "Filter by title or creator",
+  },
+  albums: {
+    title: "Your favorite albums",
+    searchPlaceholder: "Filter by title or artist",
+  },
+  artists: {
+    title: "Artists you follow",
+    searchPlaceholder: "Filter by name",
+  },
+  mixes: {
+    title: "Mixes & Radios you liked",
+    searchPlaceholder: "Filter by title",
+  },
+} as const;
+
+const PAGE_SIZE = 50;
+
+export default function LibraryViewAll({ libraryType }: LibraryViewAllProps) {
+  const { authTokens } = useAuth();
+  const {
+    navigateToPlaylist,
+    navigateToAlbum,
+    navigateToArtist,
+    navigateToMix,
+  } = useNavigation();
+  const playMedia = useMediaPlay();
+  const {
+    favoriteAlbumIds, addFavoriteAlbum, removeFavoriteAlbum,
+    favoritePlaylistUuids, addFavoritePlaylist, removeFavoritePlaylist,
+    followedArtistIds, followArtist, unfollowArtist,
+    favoriteMixIds, addFavoriteMix, removeFavoriteMix,
+  } = useFavorites();
+
+  const favoritePlaylists = useAtomValue(favoritePlaylistsAtom);
+
+  const [items, setItems] = useState<any[]>([]);
+  const [totalCount, setTotalCount] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+
+  const offsetRef = useRef(0);
+  const hasMoreRef = useRef(true);
+  const bgFetchingRef = useRef(false);
+  const cancelledRef = useRef(false);
+
+  const sentinelRef = useRef<HTMLDivElement>(null);
+
+  const config = CONFIG[libraryType];
+  const userId = authTokens?.user_id;
+
+  // ==================== Data Fetching ====================
+
+  const fetchPage = useCallback(
+    async (offset: number, limit: number): Promise<{ items: any[]; totalNumberOfItems: number }> => {
+      switch (libraryType) {
+        case "playlists": {
+          if (!userId) return { items: [], totalNumberOfItems: 0 };
+          const [userPl, favPl] = await Promise.all([
+            getUserPlaylists(userId, offset, limit),
+            offset === 0 ? getFavoritePlaylists(userId, 0, limit) : Promise.resolve({ items: [] as Playlist[], totalNumberOfItems: 0 }),
+          ]);
+          // Merge: user playlists first, append non-duplicate favorites (first page only)
+          const seen = new Set<string>();
+          const merged: Playlist[] = [];
+          for (const p of userPl.items) {
+            if (!seen.has(p.uuid)) { seen.add(p.uuid); merged.push(p); }
+          }
+          if (offset === 0) {
+            for (const p of favPl.items) {
+              if (!seen.has(p.uuid)) { seen.add(p.uuid); merged.push(p); }
+            }
+          }
+          return {
+            items: merged,
+            totalNumberOfItems: Math.max(userPl.totalNumberOfItems, merged.length),
+          };
+        }
+        case "albums": {
+          if (!userId) return { items: [], totalNumberOfItems: 0 };
+          return getFavoriteAlbums(userId, offset, limit);
+        }
+        case "artists": {
+          if (!userId) return { items: [], totalNumberOfItems: 0 };
+          return getFavoriteArtists(userId, offset, limit);
+        }
+        case "mixes": {
+          return getFavoriteMixes(offset, limit);
+        }
+      }
+    },
+    [libraryType, userId]
+  );
+
+  // Load first page
+  useEffect(() => {
+    cancelledRef.current = false;
+    bgFetchingRef.current = false;
+    setItems([]);
+    setTotalCount(0);
+    setLoading(true);
+    offsetRef.current = 0;
+    hasMoreRef.current = true;
+
+    (async () => {
+      try {
+        const page = await fetchPage(0, PAGE_SIZE);
+        if (cancelledRef.current) return;
+        setItems(page.items);
+        setTotalCount(page.totalNumberOfItems);
+        offsetRef.current = page.items.length;
+        hasMoreRef.current = page.items.length < page.totalNumberOfItems;
+      } catch (err) {
+        console.error("Failed to load library items:", err);
+      } finally {
+        if (!cancelledRef.current) setLoading(false);
+      }
+    })();
+
+    return () => { cancelledRef.current = true; };
+  }, [fetchPage]);
+
+  // Background fetch remaining
+  const fetchRemaining = useCallback(async () => {
+    if (bgFetchingRef.current || !hasMoreRef.current) return;
+    bgFetchingRef.current = true;
+    try {
+      while (hasMoreRef.current && !cancelledRef.current) {
+        const page = await fetchPage(offsetRef.current, PAGE_SIZE);
+        if (cancelledRef.current) return;
+        startTransition(() => {
+          setItems((prev) => {
+            const idKey = libraryType === "playlists" ? "uuid" : "id";
+            const seen = new Set(prev.map((item) => item[idKey]));
+            return [...prev, ...page.items.filter((item) => !seen.has(item[idKey]))];
+          });
+          setTotalCount(page.totalNumberOfItems);
+        });
+        offsetRef.current += page.items.length;
+        hasMoreRef.current = offsetRef.current < page.totalNumberOfItems;
+      }
+    } catch (err) {
+      console.error("Failed to background-fetch library items:", err);
+    } finally {
+      bgFetchingRef.current = false;
+    }
+  }, [fetchPage, libraryType]);
+
+  // Load more (infinite scroll trigger)
+  const loadMore = useCallback(async () => {
+    if (loadingMore || !hasMoreRef.current || bgFetchingRef.current) return;
+    setLoadingMore(true);
+    try {
+      const page = await fetchPage(offsetRef.current, PAGE_SIZE);
+      if (cancelledRef.current) return;
+      setItems((prev) => {
+        const idKey = libraryType === "playlists" ? "uuid" : "id";
+        const seen = new Set(prev.map((item) => item[idKey]));
+        return [...prev, ...page.items.filter((item) => !seen.has(item[idKey]))];
+      });
+      setTotalCount(page.totalNumberOfItems);
+      offsetRef.current += page.items.length;
+      hasMoreRef.current = offsetRef.current < page.totalNumberOfItems;
+    } catch (err) {
+      console.error("Failed to load more:", err);
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [loadingMore, fetchPage, libraryType]);
+
+  // Infinite scroll observer
+  useEffect(() => {
+    const sentinel = sentinelRef.current;
+    if (!sentinel) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0]?.isIntersecting) loadMore();
+      },
+      { rootMargin: "200px" }
+    );
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [loadMore]);
+
+  // For playlists, also merge in boot-time favorites atom
+  const displayItems = useMemo(() => {
+    if (libraryType !== "playlists") return items;
+    const seen = new Set<string>();
+    const merged: any[] = [];
+    for (const p of items) {
+      if (!seen.has(p.uuid)) { seen.add(p.uuid); merged.push(p); }
+    }
+    for (const p of favoritePlaylists) {
+      if (!seen.has(p.uuid)) { seen.add(p.uuid); merged.push(p); }
+    }
+    return merged;
+  }, [items, favoritePlaylists, libraryType]);
+
+  // ==================== Search / Filter ====================
+
+  const [searchQuery, setSearchQuery] = useState("");
+  const isFiltering = searchQuery.trim().length > 0;
+
+  const filteredItems = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return displayItems;
+    return displayItems.filter((item) => {
+      switch (libraryType) {
+        case "playlists":
+          return (
+            item.title?.toLowerCase().includes(q) ||
+            item.description?.toLowerCase().includes(q) ||
+            item.creator?.name?.toLowerCase().includes(q)
+          );
+        case "albums":
+          return (
+            item.title?.toLowerCase().includes(q) ||
+            item.artist?.name?.toLowerCase().includes(q)
+          );
+        case "artists":
+          return item.name?.toLowerCase().includes(q);
+        case "mixes":
+          return (
+            item.title?.toLowerCase().includes(q) ||
+            item.subTitle?.toLowerCase().includes(q)
+          );
+      }
+    });
+  }, [displayItems, searchQuery, libraryType]);
+
+  const handleSearchFocus = useCallback(() => {
+    if (hasMoreRef.current && !bgFetchingRef.current) {
+      setTimeout(() => fetchRemaining(), 0);
+    }
+  }, [fetchRemaining]);
+
+  // ==================== Context Menu ====================
+
+  const [contextMenu, setContextMenu] = useState<{
+    item: MediaItemType;
+    position: { x: number; y: number };
+  } | null>(null);
+
+  const handleContextMenu = useCallback(
+    (e: React.MouseEvent, item: any) => {
+      const sectionType =
+        libraryType === "artists" ? "ARTIST_LIST" :
+        libraryType === "mixes" ? "MIX_LIST" : undefined;
+      const mediaItem = buildMediaItem(item, sectionType);
+      if (mediaItem) {
+        e.preventDefault();
+        e.stopPropagation();
+        setContextMenu({ item: mediaItem, position: { x: e.clientX, y: e.clientY } });
+      }
+    },
+    [libraryType]
+  );
+
+  // ==================== Navigation ====================
+
+  const handleItemClick = useCallback(
+    (item: any) => {
+      switch (libraryType) {
+        case "playlists":
+          navigateToPlaylist(item.uuid, {
+            title: item.title,
+            image: item.image,
+            description: item.description,
+            creatorName: item.creator?.name || (item.creator?.id === 0 ? "TIDAL" : undefined),
+            numberOfTracks: item.numberOfTracks,
+            isUserPlaylist: userId != null && item.creator?.id === userId,
+          });
+          break;
+        case "albums":
+          navigateToAlbum(item.id, {
+            title: item.title,
+            cover: item.cover,
+            artistName: item.artist?.name,
+          });
+          break;
+        case "artists":
+          navigateToArtist(item.id, { name: item.name, picture: item.picture });
+          break;
+        case "mixes":
+          navigateToMix(item.id, {
+            title: item.title,
+            image: item.images?.MEDIUM?.url,
+            subtitle: item.subTitle,
+          });
+          break;
+      }
+    },
+    [libraryType, navigateToPlaylist, navigateToAlbum, navigateToArtist, navigateToMix, userId]
+  );
+
+  // ==================== Play ====================
+
+  const handlePlay = useCallback(
+    (e: React.MouseEvent, item: any) => {
+      e.stopPropagation();
+      const sectionType =
+        libraryType === "artists" ? "ARTIST_LIST" :
+        libraryType === "mixes" ? "MIX_LIST" : undefined;
+      const mediaItem = buildMediaItem(item, sectionType);
+      if (mediaItem) playMedia(mediaItem);
+    },
+    [libraryType, playMedia]
+  );
+
+  // ==================== Favorites ====================
+
+  const isFavorited = useCallback(
+    (item: any): boolean => {
+      switch (libraryType) {
+        case "playlists": return favoritePlaylistUuids.has(item.uuid);
+        case "albums": return favoriteAlbumIds.has(item.id);
+        case "artists": return followedArtistIds.has(item.id);
+        case "mixes": return favoriteMixIds.has(item.id);
+      }
+    },
+    [libraryType, favoritePlaylistUuids, favoriteAlbumIds, followedArtistIds, favoriteMixIds]
+  );
+
+  const handleFavoriteToggle = useCallback(
+    (e: React.MouseEvent, item: any) => {
+      e.stopPropagation();
+      switch (libraryType) {
+        case "playlists":
+          if (favoritePlaylistUuids.has(item.uuid)) removeFavoritePlaylist(item.uuid);
+          else addFavoritePlaylist(item.uuid, item);
+          break;
+        case "albums":
+          if (favoriteAlbumIds.has(item.id)) removeFavoriteAlbum(item.id);
+          else addFavoriteAlbum(item.id, item);
+          break;
+        case "artists":
+          if (followedArtistIds.has(item.id)) unfollowArtist(item.id);
+          else followArtist(item.id, item);
+          break;
+        case "mixes":
+          if (favoriteMixIds.has(item.id)) removeFavoriteMix(item.id);
+          else addFavoriteMix(item.id);
+          break;
+      }
+    },
+    [
+      libraryType, favoritePlaylistUuids, favoriteAlbumIds, followedArtistIds, favoriteMixIds,
+      addFavoritePlaylist, removeFavoritePlaylist, addFavoriteAlbum, removeFavoriteAlbum,
+      followArtist, unfollowArtist, addFavoriteMix, removeFavoriteMix,
+    ]
+  );
+
+  // ==================== Render ====================
+
+  const hasMore = !isFiltering && items.length < totalCount;
+  const isArtist = libraryType === "artists";
+  const itemCount = isFiltering ? filteredItems.length : displayItems.length;
+
+  if (loading) {
+    return (
+      <div className="flex-1 bg-linear-to-b from-th-surface to-th-base overflow-y-auto scrollbar-thin scrollbar-thumb-th-button scrollbar-track-transparent">
+        <div className="px-8 pt-10 pb-6">
+          <div className="h-8 w-64 bg-th-surface-hover rounded animate-pulse mb-2" />
+          <div className="h-4 w-32 bg-th-surface-hover rounded animate-pulse" />
+        </div>
+        <div className="px-8 pb-4">
+          <div className="h-9 w-full bg-th-surface-hover/60 rounded-md animate-pulse" />
+        </div>
+        <div className="px-8 pb-8">
+          <MediaGridSkeleton count={18} />
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex-1 bg-linear-to-b from-th-surface to-th-base overflow-y-auto scrollbar-thin scrollbar-thumb-th-button scrollbar-track-transparent">
+      {/* Header */}
+      <div className="px-8 pt-10 pb-6">
+        <h1 className="text-[32px] font-extrabold text-white leading-tight tracking-tight">
+          {config.title}
+        </h1>
+        <p className="text-[14px] text-th-text-muted mt-1">
+          {itemCount} {libraryType === "artists" ? (itemCount === 1 ? "artist" : "artists") :
+            libraryType === "albums" ? (itemCount === 1 ? "album" : "albums") :
+            libraryType === "mixes" ? (itemCount === 1 ? "mix" : "mixes") :
+            (itemCount === 1 ? "playlist" : "playlists")}
+        </p>
+      </div>
+
+      {/* Search */}
+      <div className="px-8 pb-6">
+        <DebouncedFilterInput
+          placeholder={config.searchPlaceholder}
+          onChange={setSearchQuery}
+          onFocus={handleSearchFocus}
+        />
+      </div>
+
+      {/* Grid */}
+      <div className="px-8 pb-8">
+        {filteredItems.length === 0 ? (
+          <MediaGridEmpty
+            message={isFiltering
+              ? `No ${libraryType} match your search`
+              : `No ${libraryType} yet`}
+          />
+        ) : (
+          <MediaGrid>
+            {filteredItems.map((item) => {
+              const key = item.uuid || item.id?.toString() || item.mixId;
+              return (
+                <MediaCard
+                  key={key}
+                  item={item}
+                  isArtist={isArtist}
+                  onClick={() => handleItemClick(item)}
+                  onContextMenu={(e) => handleContextMenu(e, item)}
+                  onPlay={(e) => handlePlay(e, item)}
+                  isFavorited={isFavorited(item)}
+                  onFavoriteToggle={(e) => handleFavoriteToggle(e, item)}
+                  onMoreClick={(e) => handleContextMenu(e, item)}
+                />
+              );
+            })}
+          </MediaGrid>
+        )}
+
+        {/* Infinite scroll sentinel */}
+        {hasMore && <div ref={sentinelRef} className="h-1" />}
+        {(loadingMore || (hasMore && !isFiltering)) && loadingMore && (
+          <div className="mt-4">
+            <MediaGridSkeleton count={6} />
+          </div>
+        )}
+      </div>
+
+      {/* Context menu */}
+      {contextMenu && (
+        <MediaContextMenu
+          item={contextMenu.item}
+          cursorPosition={contextMenu.position}
+          onClose={() => setContextMenu(null)}
+        />
+      )}
+    </div>
+  );
+}
