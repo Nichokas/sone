@@ -3,8 +3,9 @@ import {
   Music,
   Search,
   User,
+  MoreHorizontal,
 } from "lucide-react";
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { usePlaybackActions } from "../hooks/usePlaybackActions";
 import { useMediaPlay } from "../hooks/useMediaPlay";
 import { useNavigation } from "../hooks/useNavigation";
@@ -21,6 +22,7 @@ import {
 } from "../types";
 import TidalImage from "./TidalImage";
 import MediaContextMenu from "./MediaContextMenu";
+import TrackContextMenu from "./TrackContextMenu";
 import MediaCard from "./MediaCard";
 import ReusableTrackList from "./TrackList";
 import { SearchPageSkeleton } from "./PageSkeleton";
@@ -394,6 +396,9 @@ export default function SearchView({ query, onBack }: SearchViewProps) {
                       image: hit.image,
                     });
                 }}
+                onMediaContextMenu={(item, position) => {
+                  setContextMenu({ item, position });
+                }}
               />
             )}
 
@@ -504,13 +509,20 @@ function TopHitsList({
   onAlbumClick,
   onArtistClick,
   onPlaylistClick,
+  onMediaContextMenu,
 }: {
   topHits: DirectHitItem[];
   onPlayTrack: (hit: DirectHitItem) => void;
   onAlbumClick: (hit: DirectHitItem) => void;
   onArtistClick: (hit: DirectHitItem) => void;
   onPlaylistClick: (hit: DirectHitItem) => void;
+  onMediaContextMenu: (item: MediaItemType, position: { x: number; y: number }) => void;
 }) {
+  // Track context menu state (managed locally)
+  const [ctxTrack, setCtxTrack] = useState<{ track: Track; index: number } | null>(null);
+  const [ctxPos, setCtxPos] = useState<{ x: number; y: number } | undefined>(undefined);
+  const dotsRefs = useRef<Map<number, HTMLButtonElement>>(new Map());
+
   if (topHits.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center py-20 text-th-text-disabled">
@@ -521,41 +533,93 @@ function TopHitsList({
     );
   }
 
+  const buildTrackObj = (hit: DirectHitItem): Track => ({
+    id: hit.id || 0,
+    title: hit.title || "",
+    duration: hit.duration || 0,
+    artist: hit.artistName ? { id: 0, name: hit.artistName } : undefined,
+    album: hit.albumId ? { id: hit.albumId, title: hit.albumTitle || "", cover: hit.albumCover } : undefined,
+  });
+
   return (
     <div className="flex flex-col">
       {topHits.map((hit, idx) => {
         if (hit.hitType === "TRACKS") {
+          const trackObj = buildTrackObj(hit);
           return (
-            <button
+            <div
               key={`th-${idx}`}
-              onClick={() => onPlayTrack(hit)}
-              className="w-full flex items-center gap-4 px-3 py-3 hover:bg-th-border-subtle rounded-md transition-colors text-left group"
+              className="flex items-center gap-4 px-3 py-3 hover:bg-th-border-subtle rounded-md transition-colors text-left group/track cursor-pointer"
+              onContextMenu={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                setCtxPos({ x: e.clientX, y: e.clientY });
+                setCtxTrack({ track: trackObj, index: idx });
+              }}
             >
-              <div className="w-12 h-12 rounded bg-th-surface-hover overflow-hidden shrink-0">
-                <TidalImage
-                  src={getTidalImageUrl(hit.albumCover, 80)}
-                  alt={hit.title || ""}
-                  className="w-full h-full"
+              <button
+                className="flex-1 flex items-center gap-4 min-w-0"
+                onClick={() => onPlayTrack(hit)}
+              >
+                <div className="w-12 h-12 rounded bg-th-surface-hover overflow-hidden shrink-0 relative">
+                  <TidalImage
+                    src={getTidalImageUrl(hit.albumCover, 80)}
+                    alt={hit.title || ""}
+                    className="w-full h-full"
+                  />
+                  <div className="absolute inset-0 bg-black/40 flex items-center justify-center opacity-0 group-hover/track:opacity-100 transition-opacity">
+                    <Play size={16} fill="white" className="text-white ml-0.5" />
+                  </div>
+                </div>
+                <div className="flex-1 min-w-0 text-left">
+                  <p className="text-[14px] text-white truncate">{hit.title}</p>
+                  <p className="text-[12px] text-th-text-faint truncate">
+                    Track &middot; {hit.artistName || "Unknown Artist"}
+                  </p>
+                </div>
+              </button>
+              <button
+                ref={(el) => {
+                  if (el) dotsRefs.current.set(trackObj.id, el);
+                  else dotsRefs.current.delete(trackObj.id);
+                }}
+                className="p-1 rounded-full text-th-text-faint hover:text-white opacity-0 group-hover/track:opacity-100 transition-opacity shrink-0"
+                title="More options"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setCtxPos(undefined);
+                  setCtxTrack((prev) => (prev?.track.id === trackObj.id ? null : { track: trackObj, index: idx }));
+                }}
+              >
+                <MoreHorizontal size={16} />
+              </button>
+              {ctxTrack?.track.id === trackObj.id && (
+                <TrackContextMenu
+                  track={trackObj}
+                  index={ctxTrack.index}
+                  anchorRef={{ current: dotsRefs.current.get(trackObj.id) ?? null }}
+                  cursorPosition={ctxPos}
+                  onClose={() => setCtxTrack(null)}
                 />
-              </div>
-              <div className="flex-1 min-w-0">
-                <p className="text-[14px] text-white truncate">{hit.title}</p>
-                <p className="text-[12px] text-th-text-faint truncate">
-                  Track &middot; {hit.artistName || "Unknown Artist"}
-                </p>
-              </div>
-              <div className="w-10 h-10 rounded-full bg-th-accent flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
-                <Play size={16} fill="black" className="text-black ml-0.5" />
-              </div>
-            </button>
+              )}
+            </div>
           );
         }
         if (hit.hitType === "ALBUMS") {
           return (
-            <button
+            <div
               key={`th-${idx}`}
+              className="flex items-center gap-4 px-3 py-3 hover:bg-th-border-subtle rounded-md transition-colors text-left group/item cursor-pointer"
               onClick={() => onAlbumClick(hit)}
-              className="w-full flex items-center gap-4 px-3 py-3 hover:bg-th-border-subtle rounded-md transition-colors text-left group"
+              onContextMenu={(e) => {
+                if (!hit.id) return;
+                e.preventDefault();
+                e.stopPropagation();
+                onMediaContextMenu(
+                  { type: "album", id: hit.id, title: hit.title || "", cover: hit.cover, artistName: hit.artistName },
+                  { x: e.clientX, y: e.clientY },
+                );
+              }}
             >
               <div className="w-12 h-12 rounded bg-th-surface-hover overflow-hidden shrink-0">
                 <TidalImage
@@ -571,15 +635,38 @@ function TopHitsList({
                   {hit.numberOfTracks ? ` · ${hit.numberOfTracks} tracks` : ""}
                 </p>
               </div>
-            </button>
+              <button
+                className="p-1 rounded-full text-th-text-faint hover:text-white opacity-0 group-hover/item:opacity-100 transition-opacity shrink-0"
+                title="More options"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (!hit.id) return;
+                  onMediaContextMenu(
+                    { type: "album", id: hit.id, title: hit.title || "", cover: hit.cover, artistName: hit.artistName },
+                    { x: e.clientX, y: e.clientY },
+                  );
+                }}
+              >
+                <MoreHorizontal size={16} />
+              </button>
+            </div>
           );
         }
         if (hit.hitType === "ARTISTS") {
           return (
-            <button
+            <div
               key={`th-${idx}`}
+              className="flex items-center gap-4 px-3 py-3 hover:bg-th-border-subtle rounded-md transition-colors text-left group/item cursor-pointer"
               onClick={() => onArtistClick(hit)}
-              className="w-full flex items-center gap-4 px-3 py-3 hover:bg-th-border-subtle rounded-md transition-colors text-left group"
+              onContextMenu={(e) => {
+                if (!hit.id) return;
+                e.preventDefault();
+                e.stopPropagation();
+                onMediaContextMenu(
+                  { type: "artist", id: hit.id, name: hit.name || "", picture: hit.picture },
+                  { x: e.clientX, y: e.clientY },
+                );
+              }}
             >
               <div className="w-12 h-12 rounded-full bg-th-surface-hover overflow-hidden shrink-0">
                 {hit.picture ? (
@@ -600,15 +687,38 @@ function TopHitsList({
                 </p>
                 <p className="text-[12px] text-th-text-faint">Artist</p>
               </div>
-            </button>
+              <button
+                className="p-1 rounded-full text-th-text-faint hover:text-white opacity-0 group-hover/item:opacity-100 transition-opacity shrink-0"
+                title="More options"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (!hit.id) return;
+                  onMediaContextMenu(
+                    { type: "artist", id: hit.id, name: hit.name || "", picture: hit.picture },
+                    { x: e.clientX, y: e.clientY },
+                  );
+                }}
+              >
+                <MoreHorizontal size={16} />
+              </button>
+            </div>
           );
         }
         if (hit.hitType === "PLAYLISTS") {
           return (
-            <button
+            <div
               key={`th-${idx}`}
+              className="flex items-center gap-4 px-3 py-3 hover:bg-th-border-subtle rounded-md transition-colors text-left group/item cursor-pointer"
               onClick={() => onPlaylistClick(hit)}
-              className="w-full flex items-center gap-4 px-3 py-3 hover:bg-th-border-subtle rounded-md transition-colors text-left group"
+              onContextMenu={(e) => {
+                if (!hit.uuid) return;
+                e.preventDefault();
+                e.stopPropagation();
+                onMediaContextMenu(
+                  { type: "playlist", uuid: hit.uuid, title: hit.title || "", image: hit.image },
+                  { x: e.clientX, y: e.clientY },
+                );
+              }}
             >
               <div className="w-12 h-12 rounded bg-th-surface-hover overflow-hidden shrink-0">
                 {hit.image ? (
@@ -631,7 +741,21 @@ function TopHitsList({
                   {hit.numberOfTracks ? ` · ${hit.numberOfTracks} tracks` : ""}
                 </p>
               </div>
-            </button>
+              <button
+                className="p-1 rounded-full text-th-text-faint hover:text-white opacity-0 group-hover/item:opacity-100 transition-opacity shrink-0"
+                title="More options"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (!hit.uuid) return;
+                  onMediaContextMenu(
+                    { type: "playlist", uuid: hit.uuid, title: hit.title || "", image: hit.image },
+                    { x: e.clientX, y: e.clientY },
+                  );
+                }}
+              >
+                <MoreHorizontal size={16} />
+              </button>
+            </div>
           );
         }
         return null;
