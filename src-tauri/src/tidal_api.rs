@@ -125,11 +125,14 @@ pub struct TidalArtist {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct TidalAlbum {
     pub id: u64,
     pub title: String,
     #[serde(default)]
     pub cover: Option<String>,
+    #[serde(default)]
+    pub vibrant_color: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]

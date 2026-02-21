@@ -14,7 +14,6 @@ import {
 } from "lucide-react";
 import { useState, useEffect, useRef, useCallback, memo, useMemo } from "react";
 import { useAtomValue } from "jotai";
-import { invoke } from "@tauri-apps/api/core";
 import {
   isPlayingAtom,
   currentTrackAtom,
@@ -1231,124 +1230,24 @@ function TrackRow({
 
 // ─── Main Drawer ─────────────────────────────────────────────────────────────
 
-/** Extract the average color from an image URL via fetch + canvas. */
-// @ts-ignore
-function useDominantColor(imageUrl: string | undefined) {
-  const [color, setColor] = useState<string | null>(null);
-  const prevUrl = useRef<string | undefined>(undefined);
-
-  useEffect(() => {
-    if (!imageUrl) {
-      setColor(null);
-      return;
-    }
-    if (imageUrl === prevUrl.current) return;
-    prevUrl.current = imageUrl;
-
-    console.log("useDominantColor: Processing", imageUrl);
-    let cancelled = false;
-
-    // Fetch via Tauri backend to bypass CORS
-    invoke<number[]>("get_image_bytes", { url: imageUrl })
-      .then((bytes) => {
-        if (cancelled) return;
-        const u8arr = new Uint8Array(bytes);
-        const blob = new Blob([u8arr]);
-        const blobUrl = URL.createObjectURL(blob);
-
-        const img = new Image();
-        img.onload = () => {
-          try {
-            const size = 50;
-            const canvas = document.createElement("canvas");
-            canvas.width = size;
-            canvas.height = size;
-            const ctx = canvas.getContext("2d");
-            if (!ctx) {
-              console.error("useDominantColor: No 2d context");
-              return;
-            }
-
-            // Draw the image scaled down
-            ctx.drawImage(img, 0, 0, size, size);
-
-            const imageData = ctx.getImageData(0, 0, size, size).data;
-            const colorCounts: Record<string, number> = {};
-            let maxCount = 0;
-            let dominantColor = "0, 0, 0";
-
-            // Quantize colors to group similar shades
-            const quantization = 10;
-
-            for (let i = 0; i < imageData.length; i += 4) {
-              const r = imageData[i];
-              const g = imageData[i + 1];
-              const b = imageData[i + 2];
-              const a = imageData[i + 3];
-
-              // Skip transparent pixels
-              if (a < 128) continue;
-
-              const qr = Math.floor(r / quantization) * quantization;
-              const qg = Math.floor(g / quantization) * quantization;
-              const qb = Math.floor(b / quantization) * quantization;
-
-              const key = `${qr},${qg},${qb}`;
-              colorCounts[key] = (colorCounts[key] || 0) + 1;
-
-              if (colorCounts[key] > maxCount) {
-                maxCount = colorCounts[key];
-                dominantColor = `${qr}, ${qg}, ${qb}`;
-              }
-            }
-
-            console.log(
-              "useDominantColor: Found dominant color",
-              dominantColor
-            );
-            if (!cancelled) {
-              setColor(dominantColor);
-            }
-          } catch (e) {
-            console.error("useDominantColor: Canvas error", e);
-          } finally {
-            URL.revokeObjectURL(blobUrl);
-          }
-        };
-        img.onerror = (e) => {
-          console.error("useDominantColor: Image load error", e);
-          URL.revokeObjectURL(blobUrl);
-        };
-        img.src = blobUrl;
-      })
-      .catch((e) => {
-        console.error("useDominantColor: Tauri fetch error", e);
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [imageUrl]);
-
-  return color;
-}
-
 export default function NowPlayingDrawer() {
   const currentTrack = useAtomValue(currentTrackAtom);
   const { drawerOpen, setDrawerOpen, drawerTab, setDrawerTab } = useDrawer();
   const activeTab = (drawerTab || "queue") as TabId;
   const setActiveTab = (tab: TabId) => setDrawerTab(tab);
 
-  const coverUrl = currentTrack
-    ? getTidalImageUrl(currentTrack.album?.cover, 80)
-    : undefined;
-  const dominantColor = useDominantColor(coverUrl);
+  const vibrantColor = currentTrack?.album?.vibrantColor;
 
   // Derive an adaptive overlay color: darken bright colors and lower their
   // opacity so text always stays readable against the tinted background.
   const overlayBg = useMemo(() => {
-    if (!dominantColor) return "transparent";
-    const [r, g, b] = dominantColor.split(",").map((s) => parseInt(s.trim(), 10));
+    if (!vibrantColor) return "transparent";
+    // Parse hex color (e.g. "#7B3F50" or "7B3F50")
+    const hex = vibrantColor.replace(/^#/, "");
+    const r = parseInt(hex.slice(0, 2), 16);
+    const g = parseInt(hex.slice(2, 4), 16);
+    const b = parseInt(hex.slice(4, 6), 16);
+    if (isNaN(r) || isNaN(g) || isNaN(b)) return "transparent";
     // Perceived brightness (ITU-R BT.601)
     const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
     // Darken bright colors by mixing toward black
@@ -1359,7 +1258,7 @@ export default function NowPlayingDrawer() {
     // Opacity: bright → lower (0.35), dark → higher (0.65)
     const opacity = 0.90 - luminance * 0.3;
     return `rgba(${dr}, ${dg}, ${db}, ${opacity.toFixed(2)})`;
-  }, [dominantColor]);
+  }, [vibrantColor]);
 
   // Close on Escape
   useEffect(() => {
@@ -1411,16 +1310,16 @@ export default function NowPlayingDrawer() {
           }}
         />
 
-        {/* Left: Album Art — 40% */}
-        <div className="relative z-[1] w-[40%] flex flex-col items-center justify-center p-10 gap-6">
-          <div className="w-full max-w-[380px] aspect-square rounded-lg overflow-hidden shadow-2xl shadow-black/60">
+        {/* Left: Album Art — 45% */}
+        <div className="relative z-[1] w-[45%] flex flex-col items-center justify-center p-10 gap-6">
+          <div className="w-full max-w-[520px] aspect-square rounded-lg overflow-hidden shadow-2xl shadow-black/60">
             <TidalImage
               src={getTidalImageUrl(currentTrack.album?.cover, 640)}
               alt={currentTrack.album?.title || currentTrack.title}
               className="w-full h-full"
             />
           </div>
-          <div className="text-center w-full max-w-[380px]">
+          <div className="text-center w-full max-w-[520px]">
             <h2 className="text-[22px] font-bold text-white truncate">
               {currentTrack.title}
             </h2>
@@ -1430,8 +1329,8 @@ export default function NowPlayingDrawer() {
           </div>
         </div>
 
-        {/* Right: Tabs — 60% */}
-        <div className="relative z-[1] w-[60%] flex flex-col min-w-0 border-l border-th-border-subtle">
+        {/* Right: Tabs — 55% */}
+        <div className="relative z-[1] w-[55%] flex flex-col min-w-0 border-l border-th-border-subtle">
           {/* Tab bar + close */}
           <div className="flex items-center justify-between px-6 pt-5 pb-2">
             <div className="flex items-center gap-1 flex-wrap">

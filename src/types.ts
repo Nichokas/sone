@@ -27,7 +27,7 @@ export interface Track {
   id: number;
   title: string;
   artist?: { id: number; name: string; picture?: string };
-  album?: { id: number; title: string; cover?: string };
+  album?: { id: number; title: string; cover?: string; vibrantColor?: string };
   duration: number;
   audioQuality?: string;
   trackNumber?: number;
