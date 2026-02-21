@@ -63,6 +63,7 @@ impl AudioPlayer {
             let mut user_volume_el: Option<gst::Element> = None;
             let mut norm_volume_el: Option<gst::Element> = None;
             let eos = Arc::new(AtomicBool::new(false));
+            let tearing_down = Arc::new(AtomicBool::new(false));
             let has_uri = AtomicBool::new(false);
 
             let mut exclusive = false;
@@ -76,10 +77,47 @@ impl AudioPlayer {
                 match cmd {
                     AudioCommand::PlayUrl { uri, reply } => {
                         let result = (|| -> Result<(), String> {
-                            if let Some(ref old) = pipeline {
+                            if let Some(old) = pipeline.take() {
+                                if exclusive || bit_perfect {
+                                    log::debug!("[audio] teardown: exclusive={exclusive} bit_perfect={bit_perfect} has_vol={}", user_volume_el.is_some());
+                                    tearing_down.store(true, Ordering::SeqCst);
+
+                                    // Fade volume to mask DC offset pop (non-bit-perfect only)
+                                    if let Some(ref vol) = user_volume_el {
+                                        for i in (0..10).rev() {
+                                            vol.set_property("volume", current_volume * (i as f64 / 10.0));
+                                            std::thread::sleep(std::time::Duration::from_millis(10));
+                                        }
+                                        // Let silence propagate through the ALSA ring buffer
+                                        // so snd_pcm_close() transitions from near-zero output
+                                        std::thread::sleep(std::time::Duration::from_millis(150));
+                                        log::debug!("[audio] teardown: volume faded to 0 + silence fill");
+                                    }
+
+                                    // EOS drain: flush the ALSA buffer gracefully instead of
+                                    // cutting the PCM stream mid-sample
+                                    old.send_event(gst::event::Eos::new());
+                                    let start = std::time::Instant::now();
+                                    while !eos.load(Ordering::SeqCst)
+                                        && start.elapsed() < std::time::Duration::from_millis(1000)
+                                    {
+                                        std::thread::sleep(std::time::Duration::from_millis(10));
+                                    }
+                                    log::debug!("[audio] teardown: EOS drain took {:?}, eos_flag={}", start.elapsed(), eos.load(Ordering::SeqCst));
+                                }
                                 old.set_state(gst::State::Null)
                                     .map_err(|e| format!("Failed to stop old pipeline: {e}"))?;
+                                let _ = old.state(gst::ClockTime::from_mseconds(500));
+                                let was_exclusive = exclusive || bit_perfect;
+                                drop(old);
+                                if was_exclusive {
+                                    std::thread::sleep(std::time::Duration::from_millis(50));
+                                    tearing_down.store(false, Ordering::SeqCst);
+                                    log::debug!("[audio] teardown: complete, device released");
+                                }
                             }
+                            user_volume_el = None;
+                            norm_volume_el = None;
                             eos.store(false, Ordering::SeqCst);
                             has_uri.store(true, Ordering::SeqCst);
 
@@ -92,7 +130,8 @@ impl AudioPlayer {
                                 .build()
                                 .map_err(|e| format!("Failed to create audioconvert: {e}"))?;
 
-                            if bit_perfect {
+                            log::debug!("[audio] building pipeline: exclusive={exclusive} bit_perfect={bit_perfect}");
+                            let (u_vol, n_vol) = if bit_perfect {
                                 let capsfilter = gst::ElementFactory::make("capsfilter")
                                     .build()
                                     .map_err(|e| format!("Failed to create capsfilter: {e}"))?;
@@ -100,6 +139,8 @@ impl AudioPlayer {
                                     .ok_or_else(|| "No audio device selected for exclusive mode".to_string())?;
                                 let sink = gst::ElementFactory::make("alsasink")
                                     .property("device", dev)
+                                    .property("buffer-time", 500_000i64)
+                                    .property("latency-time", 50_000i64)
                                     .build()
                                     .map_err(|e| format!("Failed to create alsasink: {e}"))?;
 
@@ -108,9 +149,50 @@ impl AudioPlayer {
                                 gst::Element::link_many([&audioconvert, &capsfilter, &sink])
                                     .map_err(|e| format!("Failed to link bit-perfect chain: {e}"))?;
 
-                                user_volume_el = None;
-                                norm_volume_el = None;
+                                (None, None)
+                            } else if exclusive {
+                                // Exclusive (non-bit-perfect): lock output caps so alsasink
+                                // never sees a format change mid-stream, and audiorate fills
+                                // gaps with silence instead of XRUN on network stalls.
+                                let audioresample = gst::ElementFactory::make("audioresample")
+                                    .build()
+                                    .map_err(|e| format!("Failed to create audioresample: {e}"))?;
+                                let audiorate = gst::ElementFactory::make("audiorate")
+                                    .build()
+                                    .map_err(|e| format!("Failed to create audiorate: {e}"))?;
+                                let norm_vol = gst::ElementFactory::make("volume")
+                                    .property("volume", current_norm_gain)
+                                    .build()
+                                    .map_err(|e| format!("Failed to create norm volume: {e}"))?;
+                                let user_vol = gst::ElementFactory::make("volume")
+                                    .property("volume", current_volume)
+                                    .build()
+                                    .map_err(|e| format!("Failed to create user volume: {e}"))?;
+                                let capsfilter = gst::ElementFactory::make("capsfilter")
+                                    .property("caps", gst::Caps::builder("audio/x-raw")
+                                        .field("format", "S32LE")
+                                        .field("rate", 48000i32)
+                                        .field("channels", 2i32)
+                                        .build())
+                                    .build()
+                                    .map_err(|e| format!("Failed to create capsfilter: {e}"))?;
+                                let dev = device.as_deref()
+                                    .ok_or_else(|| "No audio device selected for exclusive mode".to_string())?;
+                                let sink = gst::ElementFactory::make("alsasink")
+                                    .property("device", dev)
+                                    .property("buffer-time", 500_000i64)
+                                    .property("latency-time", 50_000i64)
+                                    .build()
+                                    .map_err(|e| format!("Failed to create alsasink: {e}"))?;
+
+                                pipe.add_many([&uridecodebin, &audioconvert, &audioresample, &audiorate, &norm_vol, &user_vol, &capsfilter, &sink])
+                                    .map_err(|e| format!("Failed to add elements: {e}"))?;
+                                gst::Element::link_many([&audioconvert, &audioresample, &audiorate, &norm_vol, &user_vol, &capsfilter, &sink])
+                                    .map_err(|e| format!("Failed to link exclusive chain: {e}"))?;
+
+                                (Some(user_vol), Some(norm_vol))
                             } else {
+                                // Normal playback: autoaudiosink through PipeWire
                                 let audioresample = gst::ElementFactory::make("audioresample")
                                     .build()
                                     .map_err(|e| format!("Failed to create audioresample: {e}"))?;
@@ -122,27 +204,17 @@ impl AudioPlayer {
                                     .property("volume", current_volume)
                                     .build()
                                     .map_err(|e| format!("Failed to create user volume: {e}"))?;
-                                let sink = if exclusive {
-                                    let dev = device.as_deref()
-                                        .ok_or_else(|| "No audio device selected for exclusive mode".to_string())?;
-                                    gst::ElementFactory::make("alsasink")
-                                        .property("device", dev)
-                                        .build()
-                                        .map_err(|e| format!("Failed to create alsasink: {e}"))?
-                                } else {
-                                    gst::ElementFactory::make("autoaudiosink")
-                                        .build()
-                                        .map_err(|e| format!("Failed to create autoaudiosink: {e}"))?
-                                };
+                                let sink = gst::ElementFactory::make("autoaudiosink")
+                                    .build()
+                                    .map_err(|e| format!("Failed to create autoaudiosink: {e}"))?;
 
                                 pipe.add_many([&uridecodebin, &audioconvert, &audioresample, &norm_vol, &user_vol, &sink])
                                     .map_err(|e| format!("Failed to add elements: {e}"))?;
                                 gst::Element::link_many([&audioconvert, &audioresample, &norm_vol, &user_vol, &sink])
                                     .map_err(|e| format!("Failed to link chain: {e}"))?;
 
-                                user_volume_el = Some(user_vol);
-                                norm_volume_el = Some(norm_vol);
-                            }
+                                (Some(user_vol), Some(norm_vol))
+                            };
 
                             // Connect uridecodebin's dynamic pad to audioconvert
                             let convert_weak = audioconvert.downgrade();
@@ -164,11 +236,31 @@ impl AudioPlayer {
                                 }
                             });
 
-                            pipe.set_state(gst::State::Playing)
-                                .map_err(|e| format!("Failed to start playback: {e}"))?;
+                            // Start pipeline — staged transition for hardware sinks
+                            if exclusive || bit_perfect {
+                                // Staged transition for hardware ALSA sinks:
+                                // PAUSED opens device + starts preroll (uridecodebin fetches, caps negotiate)
+                                // state() waits for async transition to complete
+                                // PLAYING starts actual playback
+                                pipe.set_state(gst::State::Paused)
+                                    .map_err(|e| format!("Failed to start playback: {e}"))?;
+                                let (state_result, _, _) = pipe.state(gst::ClockTime::from_seconds(10));
+                                if state_result.is_err() {
+                                    pipe.set_state(gst::State::Null).ok();
+                                    return Err("Failed to start playback: pipeline timed out during preroll".into());
+                                }
+                                pipe.set_state(gst::State::Playing)
+                                    .map_err(|e| format!("Failed to start playback: {e}"))?;
+                            } else {
+                                pipe.set_state(gst::State::Playing)
+                                    .map_err(|e| format!("Failed to start playback: {e}"))?;
+                            }
+                            user_volume_el = u_vol;
+                            norm_volume_el = n_vol;
 
                             // Bus watcher — detects EOS/Error + ALSA EBUSY
                             let eos_flag = Arc::clone(&eos);
+                            let tearing_down_flag = Arc::clone(&tearing_down);
                             let app_handle_clone = app_handle.clone();
                             if let Some(bus) = pipe.bus() {
                                 std::thread::spawn(move || {
@@ -176,7 +268,9 @@ impl AudioPlayer {
                                         match msg.view() {
                                             gst::MessageView::Eos(..) => {
                                                 eos_flag.store(true, Ordering::SeqCst);
-                                                app_handle_clone.emit("track-finished", ()).ok();
+                                                if !tearing_down_flag.load(Ordering::SeqCst) {
+                                                    app_handle_clone.emit("track-finished", ()).ok();
+                                                }
                                                 break;
                                             }
                                             gst::MessageView::Error(err) => {
@@ -231,11 +325,23 @@ impl AudioPlayer {
 
                     AudioCommand::Stop { reply } => {
                         let result = match pipeline.as_ref() {
-                            Some(p) => p.set_state(gst::State::Null)
-                                .map(|_| {
-                                    eos.store(false, Ordering::SeqCst);
-                                    has_uri.store(false, Ordering::SeqCst);
-                                }).map_err(|e| format!("Failed to stop: {e}")),
+                            Some(p) => {
+                                if exclusive && !bit_perfect {
+                                    // Fade volume to mask pop on hardware sink
+                                    if let Some(ref vol) = user_volume_el {
+                                        for i in (0..10).rev() {
+                                            vol.set_property("volume", current_volume * (i as f64 / 10.0));
+                                            std::thread::sleep(std::time::Duration::from_millis(10));
+                                        }
+                                        std::thread::sleep(std::time::Duration::from_millis(150));
+                                    }
+                                }
+                                p.set_state(gst::State::Null)
+                                    .map(|_| {
+                                        eos.store(false, Ordering::SeqCst);
+                                        has_uri.store(false, Ordering::SeqCst);
+                                    }).map_err(|e| format!("Failed to stop: {e}"))
+                            }
                             None => Ok(()),
                         };
                         reply.send(result).ok();
@@ -305,7 +411,7 @@ impl AudioPlayer {
                     }
 
                     AudioCommand::ListDevices { reply } => {
-                        let result = list_alsa_devices();
+                        let result = list_alsa_devices_inner();
                         reply.send(result).ok();
                     }
                 }
@@ -360,7 +466,13 @@ impl AudioPlayer {
     }
 }
 
-fn list_alsa_devices() -> Result<Vec<AudioDevice>, String> {
+/// Enumerate ALSA hardware devices. Does NOT use the audio pipeline,
+/// so it is safe to call from any thread.
+pub fn list_alsa_devices() -> Result<Vec<AudioDevice>, String> {
+    list_alsa_devices_inner()
+}
+
+fn list_alsa_devices_inner() -> Result<Vec<AudioDevice>, String> {
     let monitor = gst::DeviceMonitor::new();
     let caps = gst::Caps::new_empty_simple("audio/x-raw");
     monitor.add_filter(Some("Audio/Sink"), Some(&caps));
