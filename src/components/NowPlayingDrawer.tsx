@@ -721,7 +721,7 @@ const LyricsLine = memo(function LyricsLine({
   return (
     <p
       ref={lineRef}
-      className={`text-[18px] font-medium cursor-default leading-snug origin-left transition-[transform,color,opacity] duration-500 ease-out ${
+      className={`text-xl font-medium cursor-default leading-snug origin-left transition-[transform,color,opacity] duration-500 ease-out ${
         isActive
           ? "scale-[1.22] font-bold text-white"
           : isPast
@@ -1238,26 +1238,14 @@ export default function NowPlayingDrawer() {
 
   const vibrantColor = currentTrack?.album?.vibrantColor;
 
-  // Derive an adaptive overlay color: darken bright colors and lower their
-  // opacity so text always stays readable against the tinted background.
-  const overlayBg = useMemo(() => {
-    if (!vibrantColor) return "transparent";
-    // Parse hex color (e.g. "#7B3F50" or "7B3F50")
+  const overlayGradient = useMemo(() => {
+    if (!vibrantColor) return "none";
     const hex = vibrantColor.replace(/^#/, "");
     const r = parseInt(hex.slice(0, 2), 16);
     const g = parseInt(hex.slice(2, 4), 16);
     const b = parseInt(hex.slice(4, 6), 16);
-    if (isNaN(r) || isNaN(g) || isNaN(b)) return "transparent";
-    // Perceived brightness (ITU-R BT.601)
-    const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
-    // Darken bright colors by mixing toward black
-    const darkFactor = Math.max(0.35, 1 - luminance * 0.7);
-    const dr = Math.round(r * darkFactor);
-    const dg = Math.round(g * darkFactor);
-    const db = Math.round(b * darkFactor);
-    // Opacity: bright → lower (0.35), dark → higher (0.65)
-    const opacity = 0.90 - luminance * 0.3;
-    return `rgba(${dr}, ${dg}, ${db}, ${opacity.toFixed(2)})`;
+    if (isNaN(r) || isNaN(g) || isNaN(b)) return "none";
+    return `linear-gradient(rgba(${r}, ${g}, ${b}, 0.28) 0%, rgba(${r}, ${g}, ${b}, 0) 90%)`;
   }, [vibrantColor]);
 
   // Close on Escape
@@ -1303,16 +1291,14 @@ export default function NowPlayingDrawer() {
         <div
           className="absolute inset-0 pointer-events-none z-0"
           style={{
-            backgroundColor: overlayBg,
-            transition: "background-color 1000ms ease-in-out",
-            maskImage: `linear-gradient(to bottom, black 0%, rgba(0, 0, 0, 0.05) 60%, transparent 70%)`,
-            WebkitMaskImage: `linear-gradient(to bottom, black 0%, rgba(0, 0, 0, 0.05) 60%, transparent 70%)`,
+            backgroundImage: overlayGradient,
+            transition: "background-image 1000ms ease-in-out",
           }}
         />
 
         {/* Left: Album Art — 45% */}
         <div className="relative z-[1] w-[45%] flex flex-col items-center justify-center p-10 gap-6">
-          <div className="w-full max-w-[520px] aspect-square rounded-lg overflow-hidden shadow-2xl shadow-black/60">
+          <div className="w-full max-w-[640px] aspect-square rounded-lg overflow-hidden shadow-2xl shadow-black/60">
             <TidalImage
               src={getTidalImageUrl(currentTrack.album?.cover, 640)}
               alt={currentTrack.album?.title || currentTrack.title}
