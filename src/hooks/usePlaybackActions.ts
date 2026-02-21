@@ -22,6 +22,7 @@ import {
   useTrackGainAtom,
 } from "../atoms/playback";
 import { getTrackRadio } from "../api/tidal";
+import { useToast } from "../contexts/ToastContext";
 import type { Track, StreamInfo } from "../types";
 
 /** Normalize a raw track-like object into a proper Track.
@@ -45,8 +46,40 @@ function extractPlaybackError(error: unknown): string {
   return typeof msg === "string" ? msg : "Playback failed";
 }
 
+/** Check if an error is a device_busy error from exclusive ALSA mode. */
+function isDeviceBusy(error: unknown): boolean {
+  return extractPlaybackError(error) === "device_busy";
+}
+
+const DEVICE_RETRY_DELAY = 500;
+const DEVICE_MAX_RETRIES = 10;
+
+/** Invoke play_tidal_track with automatic device-busy retry.
+ *  When PipeWire holds the ALSA device after pipeline teardown, this retries
+ *  with 500ms delays (up to 5s) while keeping the UI responsive. */
+async function invokePlayWithRetry(
+  trackId: number,
+  useTrackGain: boolean,
+  onFirstRetry: () => void,
+): Promise<StreamInfo> {
+  for (let attempt = 0; attempt <= DEVICE_MAX_RETRIES; attempt++) {
+    try {
+      return await invoke<StreamInfo>("play_tidal_track", { trackId, useTrackGain });
+    } catch (err: unknown) {
+      if (isDeviceBusy(err) && attempt < DEVICE_MAX_RETRIES) {
+        if (attempt === 0) onFirstRetry();
+        await new Promise((r) => setTimeout(r, DEVICE_RETRY_DELAY));
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw new Error("device_busy"); // unreachable
+}
+
 export function usePlaybackActions() {
   const store = useStore();
+  const { showToast } = useToast();
 
   const playTrack = useCallback(
     async (track: Track) => {
@@ -56,10 +89,14 @@ export function usePlaybackActions() {
           store.set(historyAtom, [...store.get(historyAtom), current]);
         }
         const normalized = normalizeTrack(track);
-        const info = await invoke<StreamInfo>("play_tidal_track", {
-          trackId: normalized.id,
-          useTrackGain: store.get(useTrackGainAtom),
-        });
+        const info = await invokePlayWithRetry(
+          normalized.id,
+          store.get(useTrackGainAtom),
+          () => {
+            store.set(isPlayingAtom, false);
+            showToast("Preparing exclusive audio…", "info");
+          },
+        );
         store.set(streamInfoAtom, info);
         store.set(currentTrackAtom, normalized);
         store.set(isPlayingAtom, true);
@@ -69,7 +106,7 @@ export function usePlaybackActions() {
         window.dispatchEvent(new CustomEvent("playback-error", { detail: extractPlaybackError(error) }));
       }
     },
-    [store]
+    [store, showToast]
   );
 
   const pauseTrack = useCallback(async () => {
@@ -88,10 +125,14 @@ export function usePlaybackActions() {
 
       const isFinished = await invoke<boolean>("is_track_finished");
       if (isFinished) {
-        const info = await invoke<StreamInfo>("play_tidal_track", {
-          trackId: track.id,
-          useTrackGain: store.get(useTrackGainAtom),
-        });
+        const info = await invokePlayWithRetry(
+          track.id,
+          store.get(useTrackGainAtom),
+          () => {
+            store.set(isPlayingAtom, false);
+            showToast("Preparing exclusive audio…", "info");
+          },
+        );
         store.set(streamInfoAtom, info);
       } else {
         await invoke("resume_track");
@@ -102,7 +143,7 @@ export function usePlaybackActions() {
       store.set(isPlayingAtom, false);
       window.dispatchEvent(new CustomEvent("playback-error", { detail: extractPlaybackError(error) }));
     }
-  }, [store]);
+  }, [store, showToast]);
 
   const setVolume = useCallback(
     async (level: number) => {
@@ -221,10 +262,14 @@ export function usePlaybackActions() {
       }
 
       try {
-        const info = await invoke<StreamInfo>("play_tidal_track", {
-          trackId: prevTrack.id,
-          useTrackGain: store.get(useTrackGainAtom),
-        });
+        const info = await invokePlayWithRetry(
+          prevTrack.id,
+          store.get(useTrackGainAtom),
+          () => {
+            store.set(isPlayingAtom, false);
+            showToast("Preparing exclusive audio…", "info");
+          },
+        );
         store.set(streamInfoAtom, info);
         store.set(currentTrackAtom, prevTrack);
         store.set(isPlayingAtom, true);
@@ -236,7 +281,7 @@ export function usePlaybackActions() {
     } else if (store.get(currentTrackAtom)) {
       await seekTo(0);
     }
-  }, [store, getPlaybackPosition, seekTo]);
+  }, [store, showToast, getPlaybackPosition, seekTo]);
 
   return {
     playTrack,

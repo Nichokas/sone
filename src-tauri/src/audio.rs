@@ -79,6 +79,9 @@ impl AudioPlayer {
                         let result = (|| -> Result<(), String> {
                             if let Some(old) = pipeline.take() {
                                 if exclusive || bit_perfect {
+                                    // Pause immediately so user hears silence during teardown
+                                    old.set_state(gst::State::Paused).ok();
+
                                     log::debug!("[audio] teardown: exclusive={exclusive} bit_perfect={bit_perfect} has_vol={}", user_volume_el.is_some());
                                     tearing_down.store(true, Ordering::SeqCst);
 
@@ -238,16 +241,29 @@ impl AudioPlayer {
 
                             // Start pipeline — staged transition for hardware sinks
                             if exclusive || bit_perfect {
-                                // Staged transition for hardware ALSA sinks:
-                                // PAUSED opens device + starts preroll (uridecodebin fetches, caps negotiate)
-                                // state() waits for async transition to complete
-                                // PLAYING starts actual playback
+                                // Single attempt: ALSA device opens during async NULL→READY.
+                                // If PipeWire holds the device (EBUSY), we return "device_busy"
+                                // immediately so the frontend can retry with UI feedback.
                                 pipe.set_state(gst::State::Paused)
-                                    .map_err(|e| format!("Failed to start playback: {e}"))?;
+                                    .map_err(|_| "device_busy".to_string())?;
                                 let (state_result, _, _) = pipe.state(gst::ClockTime::from_seconds(10));
                                 if state_result.is_err() {
+                                    // Check bus for EBUSY vs other failures
+                                    let mut is_busy = false;
+                                    if let Some(bus) = pipe.bus() {
+                                        while let Some(msg) = bus.pop() {
+                                            if let gst::MessageView::Error(err) = msg.view() {
+                                                let err_msg = err.error().to_string();
+                                                let debug_str = err.debug().map(|s| s.to_string()).unwrap_or_default();
+                                                if err_msg.contains("busy") || debug_str.contains("busy")
+                                                    || err_msg.contains("EBUSY") || debug_str.contains("EBUSY") {
+                                                    is_busy = true;
+                                                }
+                                            }
+                                        }
+                                    }
                                     pipe.set_state(gst::State::Null).ok();
-                                    return Err("Failed to start playback: pipeline timed out during preroll".into());
+                                    return Err(if is_busy { "device_busy" } else { "Failed to start playback" }.into());
                                 }
                                 pipe.set_state(gst::State::Playing)
                                     .map_err(|e| format!("Failed to start playback: {e}"))?;
