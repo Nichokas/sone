@@ -1,6 +1,6 @@
 [package]
 name = "sone"
-version = "0.5.0"
+version = "0.5.1"
 description = "Unofficial Linux client for Tidal"
 authors = ["lullabyX"]
 edition = "2021"
