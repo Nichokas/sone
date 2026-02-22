@@ -66,7 +66,7 @@ export function getItemTitle(item: any): string {
   return "";
 }
 
-export function getItemSubtitle(item: any): string {
+export function getItemSubtitle(item: any, userId?: number): string {
   if (item.subTitle) return item.subTitle;
   if (item.shortSubtitle) return item.shortSubtitle;
   if (item.subtitleTextInfo?.text) return item.subtitleTextInfo.text;
@@ -75,7 +75,22 @@ export function getItemSubtitle(item: any): string {
   if (item.artist?.name) return item.artist.name;
   if (item.artists && item.artists.length > 0)
     return item.artists.map((a: any) => a.name).join(", ");
-  if (item.creator?.name) return `By ${item.creator.name}`;
+  if (item.creator) {
+    const creatorLabel =
+      userId != null && item.creator.id === userId
+        ? "By You"
+        : item.creator.name
+          ? `By ${item.creator.name}`
+          : item.creator.id === 0
+            ? "By TIDAL"
+            : undefined;
+    const trackCount =
+      item.numberOfTracks != null
+        ? `${item.numberOfTracks} track${item.numberOfTracks !== 1 ? "s" : ""}`
+        : undefined;
+    const parts = [creatorLabel, trackCount].filter(Boolean);
+    if (parts.length > 0) return parts.join(" · ");
+  }
   if (item.description) return item.description;
   return "";
 }

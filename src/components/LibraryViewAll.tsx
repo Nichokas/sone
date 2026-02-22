@@ -27,7 +27,7 @@ interface LibraryViewAllProps {
 
 const CONFIG = {
   playlists: {
-    title: "Playlists you love",
+    title: "Playlists",
     searchPlaceholder: "Filter by title or creator",
   },
   albums: {
@@ -449,6 +449,7 @@ export default function LibraryViewAll({ libraryType }: LibraryViewAllProps) {
                   key={key}
                   item={item}
                   isArtist={isArtist}
+                  userId={libraryType === "playlists" ? userId : undefined}
                   onClick={() => handleItemClick(item)}
                   onContextMenu={(e) => handleContextMenu(e, item)}
                   onPlay={(e) => handlePlay(e, item)}

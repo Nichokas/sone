@@ -17,6 +17,8 @@ interface MediaCardProps {
   showPlayButton?: boolean;
   /** Card width class — defaults to full-width (grid-controlled). Use "w-[180px] flex-shrink-0" for horizontal scroll rows. */
   widthClass?: string;
+  /** Pass current user ID to show "By You" for own playlists */
+  userId?: number;
 }
 
 export default function MediaCard({
@@ -30,10 +32,11 @@ export default function MediaCard({
   isArtist = false,
   showPlayButton = true,
   widthClass,
+  userId,
 }: MediaCardProps) {
   const image = getItemImage(item);
   const title = getItemTitle(item);
-  const subtitle = getItemSubtitle(item);
+  const subtitle = getItemSubtitle(item, userId);
 
   return (
     <div

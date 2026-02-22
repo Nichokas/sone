@@ -311,8 +311,8 @@ export default function Sidebar() {
                   const own = isOwnPlaylist(playlist);
                   const trackCount = playlist.numberOfTracks;
 
-                  // Build subtitle: "N tracks" for own playlists, "Creator name · N tracks" for public
-                  const creatorLabel = !own ? getCreatorName(playlist) : undefined;
+                  // Build subtitle: "You · N tracks" for own, "Creator name · N tracks" for others
+                  const creatorLabel = own ? "You" : getCreatorName(playlist);
                   let subtitle = "";
                   if (creatorLabel) {
                     subtitle = creatorLabel;
