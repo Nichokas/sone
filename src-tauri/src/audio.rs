@@ -197,16 +197,17 @@ fn spawn_alsa_writer(
                     pcm.prepare().ok();
                     true
                 } else if errno == libc::ESTRPIPE {
+                    let mut recovered = false;
                     loop {
                         match pcm.resume() {
-                            Ok(_) => break,
+                            Ok(_) => { recovered = true; break; }
                             Err(e) if e.errno() == libc::EAGAIN => {
                                 std::thread::sleep(std::time::Duration::from_millis(10));
                             }
                             Err(_) => break,
                         }
                     }
-                    true
+                    recovered
                 } else {
                     false
                 }
@@ -537,7 +538,6 @@ impl AudioPlayer {
             let mut exclusive = false;
             let mut bit_perfect = false;
             let mut device: Option<String> = None;
-            let mut pipeline_exclusive = false;
 
             let mut current_volume: f64 = 1.0;
             let mut current_norm_gain: f64 = 1.0;
@@ -712,7 +712,6 @@ impl AudioPlayer {
                                         user_volume_el: u_vol,
                                         norm_volume_el: n_vol,
                                     });
-                                    pipeline_exclusive = true;
                                 }
                             } else {
                                 // ── Normal path (unchanged) ──
@@ -817,7 +816,6 @@ impl AudioPlayer {
                                     user_volume_el: Some(user_vol),
                                     norm_volume_el: Some(norm_vol),
                                 });
-                                pipeline_exclusive = false;
                             }
                             Ok(())
                         })();
@@ -874,8 +872,11 @@ impl AudioPlayer {
                                     .map_err(|e| format!("Failed to stop: {e}"))
                             }
                             Some(PlaybackBackend::DirectAlsa { pipeline, .. }) => {
-                                // Unblock writer if paused, then shut down
+                                // Bump generation so writer discards stale data,
+                                // then unblock and shut down
                                 paused.store(false, Ordering::Release);
+                                track_generation += 1;
+                                writer_gen.store(track_generation, Ordering::Release);
                                 if let Some(bus) = pipeline.bus() {
                                     bus.set_flushing(true);
                                 }
@@ -921,6 +922,7 @@ impl AudioPlayer {
                                     .map_err(|e| format!("Seek failed: {e}"))
                             }
                             Some(PlaybackBackend::DirectAlsa { pipeline, .. }) => {
+                                let was_paused = paused.load(Ordering::Acquire);
                                 paused.store(false, Ordering::Release);
                                 track_generation += 1;
                                 writer_gen.store(track_generation, Ordering::Release);
@@ -933,8 +935,12 @@ impl AudioPlayer {
                                 let seek_frames = (position_secs as f64
                                     * current_sample_rate.load(Ordering::Relaxed) as f64) as u64;
                                 frames_written.store(seek_frames, Ordering::Relaxed);
-                                pipeline.seek_simple(gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT, pos)
-                                    .map_err(|e| format!("Seek failed: {e}"))
+                                let result = pipeline.seek_simple(gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT, pos)
+                                    .map_err(|e| format!("Seek failed: {e}"));
+                                if was_paused {
+                                    paused.store(true, Ordering::Release);
+                                }
+                                result
                             }
                             None => Err("No active pipeline".into()),
                         };
@@ -1212,7 +1218,7 @@ fn build_appsink_pipeline(
                     let caps = caps_event.caps();
                     if let Some(fmt) = parse_pcm_format(caps) {
                         log::debug!("[audio] CAPS event on appsink: {fmt:?}");
-                        let _ = probe_tx.send(WriterCommand::FormatHint(fmt));
+                        let _ = probe_tx.try_send(WriterCommand::FormatHint(fmt));
                     }
                 }
             }
