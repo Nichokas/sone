@@ -97,15 +97,13 @@ fn load_or_generate_key(config_dir: &Path) -> Result<[u8; 32], SoneError> {
     let mut key = [0u8; 32];
     aes_gcm::aead::OsRng.fill_bytes(&mut key);
 
-    // Try to store in keyring first
+    // Always write file backup — keyring may be unreachable on next launch
+    // (e.g. AppImage with different D-Bus session)
+    store_key_in_file(&key_path, &key)?;
+
     match store_key_in_keyring(&key) {
-        Ok(()) => {
-            log::info!("Master key stored in OS keyring");
-        }
-        Err(e) => {
-            log::warn!("Keyring unavailable ({e}), falling back to file-based key");
-            store_key_in_file(&key_path, &key)?;
-        }
+        Ok(()) => log::info!("Master key stored in OS keyring + file backup"),
+        Err(e) => log::info!("Keyring unavailable ({e}), using file-based key"),
     }
 
     Ok(key)
