@@ -37,3 +37,6 @@ nocommit
 # flatpak
 .flatpak-builder
 flatpak*
+
+# workspace
+sone.code-workspace
