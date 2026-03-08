@@ -526,9 +526,7 @@ export default function UserMenu() {
                   </p>
                 )}
                 {proxyTestStatus === "error" && (
-                  <p className="text-[11px] text-red-400">
-                    {proxyTestMessage}
-                  </p>
+                  <p className="text-[11px] text-red-400">{proxyTestMessage}</p>
                 )}
               </div>
             </div>
