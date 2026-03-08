@@ -933,8 +933,13 @@ impl AudioPlayer {
                                             // Fade out
                                             if let Some(ref vol) = user_volume_el {
                                                 for i in (0..=10).rev() {
-                                                    vol.set_property("volume", current_volume * (i as f64 / 10.0));
-                                                    std::thread::sleep(std::time::Duration::from_millis(10));
+                                                    vol.set_property(
+                                                        "volume",
+                                                        current_volume * (i as f64 / 10.0),
+                                                    );
+                                                    std::thread::sleep(
+                                                        std::time::Duration::from_millis(10),
+                                                    );
                                                 }
                                             }
                                             old_pipe.set_state(gst::State::Null).ok();
@@ -1317,56 +1322,52 @@ impl AudioPlayer {
                     }
 
                     AudioCommand::Stop { reply } => {
-                        let result = match backend.take() {
-                            Some(PlaybackBackend::Normal { pipeline, .. }) => {
-                                if let Some(bus) = pipeline.bus() {
-                                    bus.set_flushing(true);
+                        let old_backend = backend.take();
+                        let old_writer_tx = writer_tx.take();
+                        let old_writer_thread = writer_thread.take();
+
+                        eos.store(false, Ordering::SeqCst);
+                        has_uri.store(false, Ordering::SeqCst);
+                        paused.store(false, Ordering::Release);
+                        track_generation += 1;
+                        writer_gen.store(track_generation, Ordering::Release);
+                        std::thread::spawn(move || {
+                            match old_backend {
+                                Some(PlaybackBackend::Normal { pipeline, .. }) => {
+                                    if let Some(bus) = pipeline.bus() {
+                                        bus.set_flushing(true);
+                                    }
+                                    pipeline.set_state(gst::State::Null).ok();
                                 }
-                                pipeline
-                                    .set_state(gst::State::Null)
-                                    .map(|_| {
-                                        eos.store(false, Ordering::SeqCst);
-                                        has_uri.store(false, Ordering::SeqCst);
-                                    })
-                                    .map_err(|e| format!("Failed to stop: {e}"))
-                            }
-                            Some(PlaybackBackend::DirectAlsa { pipeline, .. }) => {
-                                // Bump generation so writer discards stale data,
-                                // then unblock and shut down
-                                paused.store(false, Ordering::Release);
-                                track_generation += 1;
-                                writer_gen.store(track_generation, Ordering::Release);
-                                if let Some(bus) = pipeline.bus() {
-                                    bus.set_flushing(true);
+                                Some(PlaybackBackend::DirectAlsa { pipeline, .. }) => {
+                                    if let Some(bus) = pipeline.bus() {
+                                        bus.set_flushing(true);
+                                    }
+                                    if let Some(tx) = old_writer_tx {
+                                        let _ = tx.send_timeout(
+                                            WriterCommand::Shutdown,
+                                            std::time::Duration::from_millis(200),
+                                        );
+                                    }
+                                    pipeline.set_state(gst::State::Null).ok();
+                                    let _ = pipeline.state(gst::ClockTime::from_mseconds(500));
+                                    drop(pipeline);
+
+                                    if let Some(h) = old_writer_thread {
+                                        h.join().ok();
+                                    }
                                 }
-                                if let Some(tx) = writer_tx.take() {
-                                    let _ = tx.send_timeout(
-                                        WriterCommand::Shutdown,
-                                        std::time::Duration::from_millis(200),
-                                    );
-                                }                                
-                                pipeline.set_state(gst::State::Null).ok();
-                                let _ = pipeline.state(gst::ClockTime::from_mseconds(500));
-                                drop(pipeline);
-                                if let Some(h) = writer_thread.take() {
-                                    h.join().ok();
+                                None => {
+                                    if let Some(tx) = old_writer_tx {
+                                        let _ = tx.send(WriterCommand::Shutdown);
+                                    }
+                                    if let Some(h) = old_writer_thread {
+                                        h.join().ok();
+                                    }
                                 }
-                                eos.store(false, Ordering::SeqCst);
-                                has_uri.store(false, Ordering::SeqCst);
-                                Ok(())
-                            }
-                            None => {
-                                // Clean up orphaned writer (e.g. pipeline build failed after spawn)
-                                if let Some(tx) = writer_tx.take() {
-                                    let _ = tx.send(WriterCommand::Shutdown);
-                                }
-                                if let Some(h) = writer_thread.take() {
-                                    h.join().ok();
-                                }
-                                Ok(())
-                            }
-                        };
-                        reply.send(result).ok();
+                            };
+                        });
+                        reply.send(Ok(())).ok();
                     }
 
                     AudioCommand::SetVolume { level, reply } => {
